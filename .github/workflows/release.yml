@@ -1,0 +1,62 @@
+name: Release
+
+# 推送 v* 标签时，自动构建 macOS Universal DMG 并发布到 GitHub Releases。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: 配置 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: 配置 Rust（含 Intel + Apple Silicon 目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust 编译缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建并发布 Universal DMG
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Backtrack ${{ github.ref_name }}"
+          releaseBody: |
+            ### 下载
+
+            从下方 **Assets** 下载 `.dmg` 安装（Universal，兼容 Intel 与 Apple Silicon）。
+
+            > 应用未经 Apple 签名，首次打开若提示「已损坏」或「无法验证开发者」，在终端执行：
+            > ```bash
+            > xattr -cr /Applications/backtrack.app
+            > ```
+            > 然后重新打开即可（开源未签名应用的正常现象）。
+          releaseDraft: false
+          prerelease: false
+          args: --target universal-apple-darwin
