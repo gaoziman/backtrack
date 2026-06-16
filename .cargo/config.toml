@@ -1,0 +1,17 @@
+# 项目内 cargo 国内镜像（rsproxy.cn 直连，绕开未运行的本地代理）。
+# 作用域仅本项目，不影响全局 ~/.cargo。
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "https://rsproxy.cn/crates.io-index"
+
+[net]
+git-fetch-with-cli = true
+
+# 禁用从 git 全局继承的 7890 代理（当前未运行），强制直连国内镜像。
+[http]
+proxy = ""
