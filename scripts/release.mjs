@@ -32,10 +32,16 @@ if (sh("git tag --list").split("\n").includes(tag)) {
   fail(`标签 ${tag} 已存在`);
 }
 
+// 4. CHANGELOG.md 必须先有本版本小节（Release 正文由 CI 从这里提取）
+const tagRe = tag.replace(/\./g, "\\.");
+if (!new RegExp(`^##\\s+${tagRe}\\b`, "m").test(readFileSync("CHANGELOG.md", "utf8"))) {
+  fail(`CHANGELOG.md 缺少 "## ${tag}" 小节，请先补写本次更新内容再发版`);
+}
+
 const branch = sh("git rev-parse --abbrev-ref HEAD");
 console.log(`\n📦 准备发布 ${tag}（分支 ${branch}）\n更新版本号：`);
 
-// 4. 同步四处版本号
+// 5. 同步四处版本号
 function patch(file, regex, replacement) {
   const before = readFileSync(file, "utf8");
   const after = before.replace(regex, replacement);
@@ -53,13 +59,13 @@ patch(
   `$1${version}$2`,
 );
 
-// 5. 提交 + 打标签
+// 6. 提交 + 打标签
 sh("git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock");
 sh(`git commit -m "chore(发布): 发布 ${tag}"`);
 sh(`git tag -a ${tag} -m "Backtrack ${tag}"`);
 console.log(`\n✓ 已提交并打标签 ${tag}`);
 
-// 6. 推送分支与标签（触发 CI）
+// 7. 推送分支与标签（触发 CI）
 console.log("推送中...");
 sh(`git push origin ${branch}`);
 sh(`git push origin ${tag}`);

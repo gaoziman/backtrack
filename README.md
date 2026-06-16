@@ -100,6 +100,8 @@ cargo test real_data_smoke -- --ignored --nocapture   # 针对真实磁盘数据
 
 **v1 不做**：云同步 · 实时监听 · 导出 · 接入其他工具 · 调用任何 AI 模型。
 
+完整版本更新历史见 [CHANGELOG](CHANGELOG.md)。
+
 ## 🤝 贡献
 
 欢迎 Issue 与 PR。改动请保持与现有代码风格一致；涉及 Rust 核心逻辑的请附带 `cargo test` 通过的测试。

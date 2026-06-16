@@ -40,6 +40,32 @@ jobs:
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 提取本版本更新日志
+        id: notes
+        run: |
+          VERSION="${{ github.ref_name }}"
+          # 从 CHANGELOG.md 抽取 "## <VERSION>" 到下一个 "## " 之间的内容
+          SECTION=$(awk -v v="## $VERSION" '
+            index($0, v) == 1 { flag = 1; next }
+            /^## / && flag { flag = 0 }
+            flag { print }
+          ' CHANGELOG.md)
+          if [ -z "$SECTION" ]; then
+            SECTION="本版本更新内容详见提交记录。"
+          fi
+          {
+            echo "body<<__NOTES_EOF__"
+            echo "$SECTION"
+            echo ""
+            echo "---"
+            echo "### 下载"
+            echo ""
+            echo "从下方 **Assets** 下载 \`.dmg\` 安装（Universal，兼容 Intel 与 Apple Silicon），拖入「应用程序」即可。"
+            echo ""
+            echo "> 应用未经 Apple 签名，首次打开若提示「已损坏」或「无法验证开发者」，在终端执行 \`xattr -cr /Applications/backtrack.app\` 后重新打开即可（开源未签名应用的正常现象）。"
+            echo "__NOTES_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: 构建并发布 Universal DMG
         uses: tauri-apps/tauri-action@v0
         env:
@@ -47,16 +73,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Backtrack ${{ github.ref_name }}"
-          releaseBody: |
-            ### 下载
-
-            从下方 **Assets** 下载 `.dmg` 安装（Universal，兼容 Intel 与 Apple Silicon）。
-
-            > 应用未经 Apple 签名，首次打开若提示「已损坏」或「无法验证开发者」，在终端执行：
-            > ```bash
-            > xattr -cr /Applications/backtrack.app
-            > ```
-            > 然后重新打开即可（开源未签名应用的正常现象）。
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: --target universal-apple-darwin
