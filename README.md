@@ -15,6 +15,18 @@
 
 ![image-20260616211515585](https://gaoziman.oss-cn-hangzhou.aliyuncs.com/uPic/image-20260616211515585.png)
 
+## ⬇️ 下载安装
+
+前往 **[Releases](../../releases/latest)** 下载最新的 `.dmg`（Universal，兼容 Intel 与 Apple Silicon），拖入「应用程序」即可。
+
+> 应用未经 Apple 签名，首次打开若提示「已损坏」或「无法验证开发者」，在终端执行后重新打开即可（开源未签名应用的正常现象）：
+>
+> ```bash
+> xattr -cr /Applications/backtrack.app
+> ```
+
+需要自行编译见 [快速开始](#-快速开始)。
+
 ## ✨ 功能
 
 - **双工具扫描** — 自动索引 `~/.claude/projects/**/*.jsonl` 与 `~/.codex/sessions/**/*.jsonl`。
