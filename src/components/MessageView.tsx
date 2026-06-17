@@ -38,10 +38,12 @@ function ToolCall({ m }: { m: Message }) {
 function CollapsibleBody({
   isUser,
   dep,
+  forceExpand,
   children,
 }: {
   isUser: boolean;
   dep: string;
+  forceExpand?: boolean;
   children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -54,14 +56,15 @@ function CollapsibleBody({
     setCollapsed(true); // 切换会话/内容变化时重置为折叠
   }, [dep]);
 
-  const clamp = overflow && collapsed;
+  // 查找态下强制展开，确保折叠区内的命中可见可滚动。
+  const clamp = overflow && collapsed && !forceExpand;
 
   return (
     <>
       <div ref={ref} className={`msg-body ${isUser ? "user" : ""} ${clamp ? "clamped" : ""}`}>
         {children}
       </div>
-      {overflow && (
+      {overflow && !forceExpand && (
         <button className="collapse-btn" onClick={() => setCollapsed((c) => !c)}>
           {collapsed ? "展开全部" : "收起"}
           <span className={`cc ${collapsed ? "" : "up"}`}><IconChevronDown size={13} /></span>
@@ -71,7 +74,7 @@ function CollapsibleBody({
   );
 }
 
-export function MessageView({ m, tool }: { m: Message; tool: Tool }) {
+export function MessageView({ m, tool, forceExpand }: { m: Message; tool: Tool; forceExpand?: boolean }) {
   // 工具调用 / 工具结果 → 折叠块
   if (m.tool_name || m.role === "tool") {
     return <ToolCall m={m} />;
@@ -92,7 +95,7 @@ export function MessageView({ m, tool }: { m: Message; tool: Tool }) {
         <span className="msg-who">{who}</span>
         <span className="msg-ts">{ts}</span>
       </div>
-      <CollapsibleBody isUser={isUser} dep={m.text}>
+      <CollapsibleBody isUser={isUser} dep={m.text} forceExpand={forceExpand}>
         {isUser ? (
           m.text
         ) : (

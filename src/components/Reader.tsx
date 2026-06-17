@@ -1,10 +1,32 @@
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import { Tag } from "./Tag";
 import { MessageView } from "./MessageView";
+import { FindBar } from "./FindBar";
 import { IconCopy, IconFolder, IconTerminal } from "./icons";
 
 export function Reader() {
   const { activeSession, transcript, loadingTranscript, copyCommand, openTerminal } = useStore();
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const [findOpen, setFindOpen] = useState(false);
+
+  // 切换会话时关闭查找
+  useEffect(() => {
+    setFindOpen(false);
+  }, [activeSession?.file_path]);
+
+  // ⌘F / Ctrl+F 打开会话内查找（有活动会话时拦截浏览器默认查找）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "f" || e.key === "F")) {
+        if (!activeSession) return;
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [activeSession]);
 
   if (!activeSession) {
     return (
@@ -53,21 +75,30 @@ export function Reader() {
         </div>
       </div>
 
-      {loadingTranscript ? (
-        <div className="skeleton">
-          {[80, 60, 90, 50, 75].map((w, i) => (
-            <div key={i} className="sk-line" style={{ width: `${w}%` }} />
-          ))}
-        </div>
-      ) : (
-        <div className="transcript">
-          <div className="tcol">
-            {transcript.map((m, i) => (
-              <MessageView key={i} m={m} tool={s.tool} />
+      <div className="reader-main">
+        {findOpen && (
+          <FindBar
+            containerRef={transcriptRef}
+            recomputeKey={transcript}
+            onClose={() => setFindOpen(false)}
+          />
+        )}
+        {loadingTranscript ? (
+          <div className="skeleton">
+            {[80, 60, 90, 50, 75].map((w, i) => (
+              <div key={i} className="sk-line" style={{ width: `${w}%` }} />
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="transcript" ref={transcriptRef}>
+            <div className="tcol">
+              {transcript.map((m, i) => (
+                <MessageView key={i} m={m} tool={s.tool} forceExpand={findOpen} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </section>
   );
 }
