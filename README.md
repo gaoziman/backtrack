@@ -95,7 +95,7 @@ cargo test real_data_smoke -- --ignored --nocapture   # 针对真实磁盘数据
 
 - [x] 文件变更监听，自动刷新（v0.3.0）
 - [x] 单会话导出 Markdown / HTML（v0.5.0）
-- [ ] 搜索过滤器（按工具 / 目录 / 时间）
+- [x] 搜索过滤器（按工具 / 目录 / 时间）（v0.5.0）
 - [ ] Codex `forked_from` fork 关系可视化
 
 **v1 不做**：云同步 · 实时监听 · 导出 · 接入其他工具 · 调用任何 AI 模型。
