@@ -6,6 +6,18 @@ use walkdir::WalkDir;
 pub struct ScanItem {
     pub tool: Tool,
     pub path: PathBuf,
+    /// 文件修改时间（自 Unix 纪元的毫秒）；增量索引据此判断是否需要重新解析。
+    pub mtime: i64,
+}
+
+/// 读取文件修改时间（毫秒）；任何失败回退 0（视为"未知"，会被当作需重建）。
+fn file_mtime_millis(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// 默认的 Claude 根目录 `~/.claude/projects`。
@@ -27,6 +39,7 @@ fn collect_jsonl(root: &Path, tool: Tool, out: &mut Vec<ScanItem>) {
         if p.is_file() && p.extension().map(|e| e == "jsonl").unwrap_or(false) {
             out.push(ScanItem {
                 tool,
+                mtime: file_mtime_millis(p),
                 path: p.to_path_buf(),
             });
         }
@@ -66,6 +79,7 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(items.iter().any(|i| i.tool == Tool::Claude));
         assert!(items.iter().any(|i| i.tool == Tool::Codex));
+        assert!(items.iter().all(|i| i.mtime > 0), "应采集到文件 mtime");
     }
 
     #[test]

@@ -44,23 +44,50 @@ fn parse_item(item: &ScanItem) -> Option<(SessionMeta, Vec<Message>)> {
     }
 }
 
-/// 扫描两个根目录、解析全部会话、写入 store。返回统计。
+/// 扫描两个根目录、**增量**同步到 store，返回当前索引统计。
+///
+/// 增量策略（治本启动慢）：
+/// - 仅解析"新增"或"mtime 变化"的文件，未变文件跳过、保留既有索引行；
+/// - 删除磁盘上已不存在的会话行；
+/// - 不再全量 clear()，复用上次的持久化索引。
+/// 首次（或加列迁移后）所有文件都算"新"，等价一次全量构建。
 pub fn build_index(store: &Store, claude_root: &Path, codex_root: &Path) -> ScanSummary {
     let items = scan_files(claude_root, codex_root);
+    let existing = store.indexed_mtimes().unwrap_or_default();
 
-    // 并行解析（IO + JSON 解析是瓶颈）。
-    let parsed: Vec<(SessionMeta, Vec<Message>)> =
-        items.par_iter().filter_map(parse_item).collect();
+    // 仅并行解析新增或 mtime 变化的文件（增量核心）。
+    let parsed: Vec<(SessionMeta, Vec<Message>, i64)> = items
+        .par_iter()
+        .filter(|it| existing.get(it.path.to_string_lossy().as_ref()) != Some(&it.mtime))
+        .filter_map(|it| parse_item(it).map(|(meta, msgs)| (meta, msgs, it.mtime)))
+        .collect();
 
+    for (meta, msgs, mtime) in &parsed {
+        let (all, user, ai) = bodies_of(msgs);
+        let _ = store.upsert(meta, &all, &user, &ai, *mtime);
+    }
+
+    // 删除磁盘上已消失的会话。
+    let current: std::collections::HashSet<String> = items
+        .iter()
+        .map(|it| it.path.to_string_lossy().into_owned())
+        .collect();
+    let removed: Vec<String> = existing
+        .keys()
+        .filter(|p| !current.contains(*p))
+        .cloned()
+        .collect();
+    if !removed.is_empty() {
+        let _ = store.delete_paths(&removed);
+    }
+
+    // 统计：当前磁盘上全部会话（present），按工具分。
     let mut summary = ScanSummary::default();
-    let _ = store.clear();
-    for (meta, msgs) in &parsed {
-        match meta.tool {
+    for it in &items {
+        match it.tool {
             Tool::Claude => summary.claude += 1,
             Tool::Codex => summary.codex += 1,
         }
-        let (all, user, ai) = bodies_of(msgs);
-        let _ = store.upsert(meta, &all, &user, &ai);
     }
     summary.total = summary.claude + summary.codex;
     summary
@@ -75,6 +102,14 @@ mod tests {
         let p = dir.join(name);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::File::create(&p).unwrap().write_all(content.as_bytes()).unwrap();
+    }
+
+    /// 构造一条最小可解析的 Claude 会话 jsonl（含一条 user 文本）。
+    fn claude_jsonl(user_text: &str) -> String {
+        format!(
+            r#"{{"type":"user","cwd":"/Users/leo/ai","timestamp":"2026-06-16T01:00:00Z","message":{{"role":"user","content":"{}"}}}}"#,
+            user_text
+        )
     }
 
     #[test]
@@ -104,6 +139,80 @@ mod tests {
         assert_eq!(store.count().unwrap(), 2);
         assert_eq!(store.search("旅迹", None, None).unwrap().len(), 1);
         assert_eq!(store.list_projects().unwrap().len(), 2);
+    }
+
+    /// 增量同步：未变跳过、变更重索引、删除移除、新增加入。
+    #[test]
+    fn incremental_sync_skips_unchanged_reindexes_changed_and_removes_deleted() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let claude = tempfile::tempdir().unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        let dir = claude.path().join("-Users-leo-ai");
+        let file = dir.join("s1.jsonl");
+
+        let set_mtime = |secs: u64| {
+            let f = std::fs::File::options().write(true).open(&file).unwrap();
+            f.set_modified(UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+        };
+
+        let store = Store::open_in_memory().unwrap();
+
+        // 1. 首建：索引会话甲
+        write(&dir, "s1.jsonl", &claude_jsonl("唯一标记甲"));
+        set_mtime(1000);
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(store.search("唯一标记甲", None, None).unwrap().len(), 1);
+
+        // 2. 改内容但 mtime 不变 → 跳过（索引仍是甲）
+        write(&dir, "s1.jsonl", &claude_jsonl("唯一标记乙"));
+        set_mtime(1000);
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(store.search("唯一标记乙", None, None).unwrap().len(), 0, "mtime 未变应跳过解析");
+        assert_eq!(store.search("唯一标记甲", None, None).unwrap().len(), 1);
+
+        // 3. mtime 变新 → 重新索引（变为乙）
+        set_mtime(2000);
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(store.search("唯一标记乙", None, None).unwrap().len(), 1, "mtime 变化应重索引");
+        assert_eq!(store.search("唯一标记甲", None, None).unwrap().len(), 0);
+
+        // 4. 删除文件 → 索引移除
+        std::fs::remove_file(&file).unwrap();
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(store.count().unwrap(), 0, "文件删除后应从索引移除");
+
+        // 5. 新增文件 → 索引新增
+        write(&dir, "s2.jsonl", &claude_jsonl("全新会话丙"));
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(store.search("全新会话丙", None, None).unwrap().len(), 1);
+    }
+
+    /// 真实数据增量计时（默认忽略）：
+    /// `cargo test real_data_incremental_timing -- --ignored --nocapture`
+    /// 验证"首建全量慢、复建增量近乎瞬时"。
+    #[test]
+    #[ignore]
+    fn real_data_incremental_timing() {
+        use crate::scanner::{default_claude_root, default_codex_root};
+        use std::time::Instant;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("index.db")).unwrap();
+        let c = default_claude_root().unwrap();
+        let x = default_codex_root().unwrap();
+
+        let t1 = Instant::now();
+        let s1 = build_index(&store, &c, &x);
+        let d1 = t1.elapsed();
+
+        let t2 = Instant::now();
+        let s2 = build_index(&store, &c, &x);
+        let d2 = t2.elapsed();
+
+        println!("\n== 增量索引计时 ==");
+        println!("首建(全量): {} 会话, 耗时 {:?}", s1.total, d1);
+        println!("复建(增量,无变化): {} 会话, 耗时 {:?}", s2.total, d2);
+        assert_eq!(s1.total, s2.total, "两次会话总数应一致");
+        assert!(d2 < d1, "增量复建应快于全量首建");
     }
 
     /// 针对真实磁盘数据的冒烟测试（默认忽略）：

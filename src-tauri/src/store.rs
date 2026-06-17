@@ -35,9 +35,9 @@ impl Store {
     }
 
     fn init_schema(&mut self) -> rusqlite::Result<()> {
-        // 旧库（无 body_user 列）→ 丢弃 sessions/索引并重建。
+        // 旧库（缺 mtime 列）→ 丢弃 sessions/索引并重建。
         // 数据源自 jsonl 重扫，无损；避免逐列 ALTER 的兼容分支。
-        if self.sessions_missing_split_columns()? {
+        if self.sessions_needs_rebuild()? {
             self.conn.execute_batch(
                 "DROP TABLE IF EXISTS sessions_fts; DROP TABLE IF EXISTS sessions;",
             )?;
@@ -55,7 +55,8 @@ impl Store {
                 forked_from TEXT,
                 body        TEXT NOT NULL,
                 body_user   TEXT NOT NULL DEFAULT '',
-                body_ai     TEXT NOT NULL DEFAULT ''
+                body_ai     TEXT NOT NULL DEFAULT '',
+                mtime       INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
@@ -79,8 +80,8 @@ impl Store {
         Ok(())
     }
 
-    /// 检测既有 sessions 表是否缺少 body_user 列（旧版本库）。
-    fn sessions_missing_split_columns(&self) -> rusqlite::Result<bool> {
+    /// 检测既有 sessions 表是否缺少最新列（`mtime`），缺则需重建（旧版本库）。
+    fn sessions_needs_rebuild(&self) -> rusqlite::Result<bool> {
         let exists: bool = self.conn.query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'",
             [],
@@ -93,15 +94,7 @@ impl Store {
         let cols: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(!cols.iter().any(|c| c == "body_user"))
-    }
-
-    pub fn clear(&self) -> rusqlite::Result<()> {
-        self.conn.execute("DELETE FROM sessions", [])?;
-        if self.has_fts {
-            self.conn.execute("DELETE FROM sessions_fts", [])?;
-        }
-        Ok(())
+        Ok(!cols.iter().any(|c| c == "mtime"))
     }
 
     /// 写入（或覆盖）一条会话。
@@ -112,16 +105,17 @@ impl Store {
         body: &str,
         body_user: &str,
         body_ai: &str,
+        mtime: i64,
     ) -> rusqlite::Result<()> {
         let cap = |s: &str| -> String { s.chars().take(BODY_CAP).collect() };
         let (capped, cu, ca) = (cap(body), cap(body_user), cap(body_ai));
         self.conn.execute(
             "INSERT OR REPLACE INTO sessions
-             (id, tool, cwd, file_path, title, started_at, updated_at, msg_count, forked_from, body, body_user, body_ai)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+             (id, tool, cwd, file_path, title, started_at, updated_at, msg_count, forked_from, body, body_user, body_ai, mtime)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 m.id, m.tool.as_str(), m.cwd, m.file_path, m.title,
-                m.started_at, m.updated_at, m.message_count as i64, m.forked_from, capped, cu, ca
+                m.started_at, m.updated_at, m.message_count as i64, m.forked_from, capped, cu, ca, mtime
             ],
         )?;
         if self.has_fts {
@@ -367,6 +361,13 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+
+    /// 已索引的 `{文件路径 → mtime}` 映射，供增量同步比对。
+    pub fn indexed_mtimes(&self) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare("SELECT file_path, mtime FROM sessions")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
 }
 
 /// 把用户输入安全包装为 FTS5 字面 phrase，并按角色限定列。
@@ -426,13 +427,13 @@ mod tests {
 
     /// 测试便捷写入：合并 body 同时作为 user 文本（role-agnostic 用例足够）。
     fn up(s: &Store, m: &SessionMeta, body: &str) {
-        s.upsert(m, body, body, "").unwrap();
+        s.upsert(m, body, body, "", 0).unwrap();
     }
 
     /// 显式角色分列写入（角色过滤用例）。
     fn up_roles(s: &Store, m: &SessionMeta, body_user: &str, body_ai: &str) {
         let body = format!("{}\n{}", body_user, body_ai);
-        s.upsert(m, &body, body_user, body_ai).unwrap();
+        s.upsert(m, &body, body_user, body_ai, 0).unwrap();
     }
 
     #[test]
