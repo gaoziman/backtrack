@@ -3,7 +3,7 @@ import { useStore } from "../store";
 import type { Project, SearchHit, SessionMeta } from "../types";
 import { ContextMenu, MenuEntry } from "./ContextMenu";
 import {
-  IconChevron, IconCopy, IconEye, IconEyeOff, IconFolder, IconPencil, IconRefresh, IconReveal,
+  IconChevron, IconCopy, IconDownload, IconEye, IconEyeOff, IconFolder, IconPencil, IconRefresh, IconReveal,
   IconSliders, IconStar, IconStarFilled, IconTerminal, IconTrash,
 } from "./icons";
 
@@ -44,7 +44,7 @@ export function Sidebar({ width }: { width: number }) {
     toggleProject, toolFilter, searchResults, query, rescan, scanning,
     activeSession, selectSession,
     hideProject, unhideProject, requestDelete, deleteSessions, revealInFinder, copyCommand,
-    starred, viewMode, setViewMode, openManage, toggleStar, openRename,
+    starred, viewMode, setViewMode, openManage, toggleStar, openRename, openExport,
   } = useStore();
 
   const starredSet = new Set(starred);
@@ -111,7 +111,10 @@ export function Sidebar({ width }: { width: number }) {
         { label: "复制 resume 命令", icon: <IconTerminal size={14} />, onClick: () => copyCommand(s.resume_command) },
         // 重命名为单会话操作，多选时隐藏
         ...(single
-          ? [{ label: "重命名标题", icon: <IconPencil size={14} />, onClick: () => openRename(s) }]
+          ? [
+              { label: "重命名标题", icon: <IconPencil size={14} />, onClick: () => openRename(s) },
+              { label: "导出…", icon: <IconDownload size={14} />, onClick: () => openExport(s) },
+            ]
           : []),
         { label: "在 Finder 中显示", icon: <IconReveal size={14} />, onClick: () => revealInFinder(s.file_path, true) },
         { label: "复制文件路径", icon: <IconCopy size={14} />, onClick: () => copyCommand(s.file_path) },
@@ -163,26 +166,19 @@ export function Sidebar({ width }: { width: number }) {
     hits.map((s) => {
       const on = selected.has(s.file_path) || activeSession?.file_path === s.file_path;
       return (
-        <div key={s.file_path} className="hit">
-          <div
-            className={`sess ${on ? "active" : ""}`}
-            onClick={(e) => onSessionClick(e, s, hits)}
-            onContextMenu={(e) => onSessionContext(e, s)}
-            title={s.title}
-          >
-            <span className={`tdot ${s.tool}`} />
-            <span className="st">{hl(s.title, q)}</span>
-            <span className="stime">{relativeTime(s.updated_at)}</span>
+        <div
+          key={s.file_path}
+          className={`hit ${on ? "active" : ""}`}
+          onClick={(e) => onSessionClick(e, s, hits)}
+          onContextMenu={(e) => onSessionContext(e, s)}
+          title={s.title}
+        >
+          <div className="hrow">
+            <span className={`tool-dot ${s.tool}`} />
+            <span className="htitle">{hl(s.title, q)}</span>
+            <span className="htime">{relativeTime(s.updated_at)}</span>
           </div>
-          {s.snippet && (
-            <div
-              className="sess-snippet"
-              onClick={(e) => onSessionClick(e, s, hits)}
-              title={s.snippet}
-            >
-              {hl(s.snippet, q)}
-            </div>
-          )}
+          {s.snippet && <div className="hsnip">{hl(s.snippet, q)}</div>}
         </div>
       );
     });
