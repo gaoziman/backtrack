@@ -1,6 +1,6 @@
 //! SQLite 元数据缓存 + 子串搜索（CJK 友好，用 LIKE）。
 use crate::models::{display_name_for, Project, SearchHit, SessionMeta, Tool};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// 短查询阈值：trigram 分词器要求 MATCH 查询 ≥ 3 字符，
 /// 故 1-2 字（中文高频）走 LIKE 兜底，守住 CJK 红线。
@@ -61,7 +61,8 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
             CREATE TABLE IF NOT EXISTS hidden (cwd TEXT PRIMARY KEY);
-            CREATE TABLE IF NOT EXISTS starred (cwd TEXT PRIMARY KEY);",
+            CREATE TABLE IF NOT EXISTS starred (cwd TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS custom_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);",
         )?;
         // FTS5 全文索引（trigram 子串分词，CJK 友好）。
         // 若运行环境的 SQLite 未编译 FTS5/trigram，则建表失败 → 记录并全程走 LIKE 兜底。
@@ -185,6 +186,11 @@ impl Store {
                 params![cwd],
             )?;
         }
+        self.conn.execute(
+            "DELETE FROM custom_titles WHERE file_path IN
+             (SELECT file_path FROM sessions WHERE cwd = ?1)",
+            params![cwd],
+        )?;
         let n = self
             .conn
             .execute("DELETE FROM sessions WHERE cwd = ?1", params![cwd])?;
@@ -203,6 +209,8 @@ impl Store {
                 self.conn
                     .execute("DELETE FROM sessions_fts WHERE file_path = ?1", params![p])?;
             }
+            self.conn
+                .execute("DELETE FROM custom_titles WHERE file_path = ?1", params![p])?;
             n += self
                 .conn
                 .execute("DELETE FROM sessions WHERE file_path = ?1", params![p])?;
@@ -250,6 +258,33 @@ impl Store {
         Ok(())
     }
 
+    /// 设置会话自定义标题（独立持久化，读时 override 派生标题，不被增量重索引覆盖）。
+    pub fn set_custom_title(&self, file_path: &str, title: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO custom_titles(file_path, title) VALUES (?1, ?2)",
+            params![file_path, title],
+        )?;
+        Ok(())
+    }
+
+    /// 清除自定义标题，恢复为派生标题。
+    pub fn clear_custom_title(&self, file_path: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM custom_titles WHERE file_path = ?1", params![file_path])?;
+        Ok(())
+    }
+
+    /// 读取派生标题（恢复默认时回读返回给前端）。
+    pub fn derived_title(&self, file_path: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT title FROM sessions WHERE file_path = ?1",
+                params![file_path],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+    }
+
     fn row_to_meta(r: &rusqlite::Row) -> rusqlite::Result<SessionMeta> {
         let tool_str: String = r.get("tool")?;
         let tool = Tool::from_str(&tool_str).unwrap_or(Tool::Claude);
@@ -271,7 +306,11 @@ impl Store {
     /// 中栏：某目录下的会话，按最近活动降序。
     pub fn list_sessions(&self, cwd: &str) -> rusqlite::Result<Vec<SessionMeta>> {
         let mut stmt = self.conn.prepare(
-            "SELECT * FROM sessions WHERE cwd = ?1 ORDER BY updated_at DESC",
+            "SELECT s.id, s.tool, s.cwd, s.file_path,
+                    COALESCE(ct.title, s.title) AS title,
+                    s.started_at, s.updated_at, s.msg_count, s.forked_from
+             FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             WHERE s.cwd = ?1 ORDER BY s.updated_at DESC",
         )?;
         let rows = stmt.query_map(params![cwd], Self::row_to_meta)?;
         rows.collect()
@@ -325,7 +364,12 @@ impl Store {
         let match_expr = fts_match_expr(role, q);
         // 注意：FTS5 的 MATCH 左操作数须为表名（非别名），rank 同理。
         let mut stmt = self.conn.prepare(
-            "SELECT s.* FROM sessions_fts JOIN sessions s ON s.file_path = sessions_fts.file_path
+            "SELECT s.id, s.tool, s.cwd, s.file_path,
+                    COALESCE(ct.title, s.title) AS title,
+                    s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
+             FROM sessions_fts
+             JOIN sessions s ON s.file_path = sessions_fts.file_path
+             LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
              WHERE sessions_fts MATCH ?1 AND (?2 IS NULL OR s.updated_at >= ?2)
              ORDER BY sessions_fts.rank LIMIT 200",
         )?;
@@ -341,14 +385,18 @@ impl Store {
     ) -> rusqlite::Result<Vec<(SessionMeta, String)>> {
         let like = format!("%{}%", escape_like(q));
         let where_role = match role {
-            Some("user") => "(title LIKE ?1 ESCAPE '\\' OR body_user LIKE ?1 ESCAPE '\\')",
-            Some("ai") => "body_ai LIKE ?1 ESCAPE '\\'",
-            _ => "(title LIKE ?1 ESCAPE '\\' OR body LIKE ?1 ESCAPE '\\')",
+            Some("user") => "(s.title LIKE ?1 ESCAPE '\\' OR s.body_user LIKE ?1 ESCAPE '\\')",
+            Some("ai") => "s.body_ai LIKE ?1 ESCAPE '\\'",
+            _ => "(s.title LIKE ?1 ESCAPE '\\' OR s.body LIKE ?1 ESCAPE '\\')",
         };
         let sql = format!(
-            "SELECT * FROM sessions WHERE {where_role}
-             AND (?2 IS NULL OR updated_at >= ?2)
-             ORDER BY updated_at DESC LIMIT 200"
+            "SELECT s.id, s.tool, s.cwd, s.file_path,
+                    COALESCE(ct.title, s.title) AS title,
+                    s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
+             FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             WHERE {where_role}
+             AND (?2 IS NULL OR s.updated_at >= ?2)
+             ORDER BY s.updated_at DESC LIMIT 200"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![like, since], Self::row_to_meta_body)?;
@@ -625,5 +673,72 @@ mod tests {
         up(&s, &meta("a", "/p", "t", "2026-06-16"), "x");
         up(&s, &meta("a", "/p", "t2", "2026-06-17"), "x");
         assert_eq!(s.count().unwrap(), 1);
+    }
+
+    // ---- 自定义标题（重命名）----
+
+    #[test]
+    fn custom_title_overrides_in_list_sessions() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/x", "派生标题", "2026-06-16"), "正文");
+        s.set_custom_title("/f/a", "我的自定义标题").unwrap();
+        let list = s.list_sessions("/p/x").unwrap();
+        assert_eq!(list[0].title, "我的自定义标题");
+    }
+
+    /// 核心：自定义标题不被增量重索引（再次 upsert 派生标题）覆盖。
+    #[test]
+    fn custom_title_survives_reupsert() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/x", "派生甲", "2026-06-16"), "正文");
+        s.set_custom_title("/f/a", "自定义").unwrap();
+        // 模拟增量重索引：用新派生标题再次 upsert 同一 file_path
+        up(&s, &meta("a", "/p/x", "派生乙", "2026-06-17"), "正文改");
+        let list = s.list_sessions("/p/x").unwrap();
+        assert_eq!(list[0].title, "自定义", "自定义标题应不被重索引覆盖");
+    }
+
+    #[test]
+    fn clear_custom_title_reverts_to_derived() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/x", "派生标题", "2026-06-16"), "正文");
+        s.set_custom_title("/f/a", "自定义").unwrap();
+        s.clear_custom_title("/f/a").unwrap();
+        let list = s.list_sessions("/p/x").unwrap();
+        assert_eq!(list[0].title, "派生标题");
+        assert_eq!(s.derived_title("/f/a").unwrap().as_deref(), Some("派生标题"));
+    }
+
+    #[test]
+    fn custom_title_overrides_in_search() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/x", "无关标题", "2026-06-16"), "独特正文关键词检索");
+        s.set_custom_title("/f/a", "自定义显示名").unwrap();
+        let hits = s.search("独特正文关键词", None, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meta.title, "自定义显示名");
+    }
+
+    #[test]
+    fn delete_paths_cleans_custom_titles() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/x", "t", "2026-06-16"), "正文");
+        s.set_custom_title("/f/a", "自定义").unwrap();
+        s.delete_paths(&["/f/a".to_string()]).unwrap();
+        // 同 file_path 会话再次出现（重扫）→ 旧自定义标题不应残留
+        up(&s, &meta("a", "/p/x", "新派生", "2026-06-17"), "正文");
+        let list = s.list_sessions("/p/x").unwrap();
+        assert_eq!(list[0].title, "新派生", "删除后自定义标题不应残留");
+    }
+
+    #[test]
+    fn delete_cwd_cleans_custom_titles() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/x", "t", "2026-06-16"), "正文");
+        s.set_custom_title("/f/a", "自定义").unwrap();
+        s.delete_cwd("/p/x").unwrap();
+        up(&s, &meta("a", "/p/x", "新派生", "2026-06-17"), "正文");
+        let list = s.list_sessions("/p/x").unwrap();
+        assert_eq!(list[0].title, "新派生", "删除目录后自定义标题不应残留");
     }
 }

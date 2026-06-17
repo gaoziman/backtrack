@@ -165,6 +165,28 @@ pub fn set_starred_all(state: State<'_, AppState>, cwds: Vec<String>) -> Result<
     store.set_starred_all(&cwds).map_err(|e| e.to_string())
 }
 
+/// 重命名会话标题：写入自定义标题（独立持久化，读时 override，不被增量重索引覆盖，绝不改原始 jsonl）。
+/// 标题去首尾空白；为空则清除自定义、恢复派生标题。返回生效后的标题。
+#[tauri::command]
+pub fn rename_session(
+    state: State<'_, AppState>,
+    file_path: String,
+    title: String,
+) -> Result<String, String> {
+    let t = title.trim();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    if t.is_empty() {
+        store.clear_custom_title(&file_path).map_err(|e| e.to_string())?;
+        Ok(store
+            .derived_title(&file_path)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default())
+    } else {
+        store.set_custom_title(&file_path, t).map_err(|e| e.to_string())?;
+        Ok(t.to_string())
+    }
+}
+
 /// 在 Finder 中打开目录(reveal=false) 或定位文件(reveal=true)。
 #[tauri::command]
 pub fn reveal_in_finder(path: String, reveal: bool) -> Result<(), String> {

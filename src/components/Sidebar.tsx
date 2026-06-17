@@ -3,7 +3,7 @@ import { useStore } from "../store";
 import type { Project, SearchHit, SessionMeta } from "../types";
 import { ContextMenu, MenuEntry } from "./ContextMenu";
 import {
-  IconChevron, IconCopy, IconEye, IconEyeOff, IconFolder, IconRefresh, IconReveal,
+  IconChevron, IconCopy, IconEye, IconEyeOff, IconFolder, IconPencil, IconRefresh, IconReveal,
   IconSliders, IconStar, IconStarFilled, IconTerminal, IconTrash,
 } from "./icons";
 
@@ -44,7 +44,7 @@ export function Sidebar({ width }: { width: number }) {
     toggleProject, toolFilter, searchResults, query, rescan, scanning,
     activeSession, selectSession,
     hideProject, unhideProject, requestDelete, deleteSessions, revealInFinder, copyCommand,
-    starred, viewMode, setViewMode, openManage, toggleStar,
+    starred, viewMode, setViewMode, openManage, toggleStar, openRename,
   } = useStore();
 
   const starredSet = new Set(starred);
@@ -94,18 +94,25 @@ export function Sidebar({ width }: { width: number }) {
     e.preventDefault();
     let targets: string[];
     let delLabel: string;
+    let single: boolean;
     if (selected.has(s.file_path) && selected.size > 1) {
       targets = [...selected];
       delLabel = `删除选中的 ${selected.size} 个会话`;
+      single = false;
     } else {
       targets = [s.file_path];
       delLabel = "删除（移到废纸篓）";
       setSelected(new Set([s.file_path]));
+      single = true;
     }
     setMenu({
       x: e.clientX, y: e.clientY,
       items: [
         { label: "复制 resume 命令", icon: <IconTerminal size={14} />, onClick: () => copyCommand(s.resume_command) },
+        // 重命名为单会话操作，多选时隐藏
+        ...(single
+          ? [{ label: "重命名标题", icon: <IconPencil size={14} />, onClick: () => openRename(s) }]
+          : []),
         { label: "在 Finder 中显示", icon: <IconReveal size={14} />, onClick: () => revealInFinder(s.file_path, true) },
         { label: "复制文件路径", icon: <IconCopy size={14} />, onClick: () => copyCommand(s.file_path) },
         "divider",
