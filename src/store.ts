@@ -1,9 +1,21 @@
 // 全局 UI 状态（zustand）。两栏可展开树模型。
 import { create } from "zustand";
 import { api } from "./api";
-import type { Message, Project, SessionMeta, Tool } from "./types";
+import type {
+  Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool,
+} from "./types";
 
 type Theme = "dark" | "light";
+
+// 搜索防抖计时器（模块级，单实例）。
+let searchTimer: number | undefined;
+
+/// 把时间范围转成 ISO 下界；"all" → null。
+function sinceISO(range: SearchSince): string | null {
+  if (range === "all") return null;
+  const days = range === "7d" ? 7 : 30;
+  return new Date(Date.now() - days * 86_400_000).toISOString();
+}
 
 interface AppState {
   // 数据
@@ -18,7 +30,9 @@ interface AppState {
 
   // 搜索
   query: string;
-  searchResults: SessionMeta[] | null; // null = 非搜索态
+  searchResults: SearchHit[] | null; // null = 非搜索态
+  searchRole: SearchRole;
+  searchSince: SearchSince;
 
   // UI
   toolFilter: { claude: boolean; codex: boolean };
@@ -46,7 +60,10 @@ interface AppState {
   deleteSessions: (paths: string[]) => Promise<void>;
   revealInFinder: (path: string, reveal: boolean) => Promise<void>;
   selectSession: (s: SessionMeta) => Promise<void>;
-  setQuery: (q: string) => Promise<void>;
+  setQuery: (q: string) => void;
+  setSearchRole: (r: SearchRole) => void;
+  setSearchSince: (t: SearchSince) => void;
+  runSearch: () => void;
   toggleTool: (t: Tool) => void;
   toggleTheme: () => void;
   toggleStar: (p: Project) => Promise<void>;
@@ -72,6 +89,8 @@ export const useStore = create<AppState>((set, get) => ({
   loadingTranscript: false,
   query: "",
   searchResults: null,
+  searchRole: "all",
+  searchSince: "all",
   toolFilter: { claude: true, codex: true },
   theme: "light",
   scanning: false,
@@ -166,18 +185,45 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  setQuery: async (q) => {
+  setQuery: (q) => {
     set({ query: q });
     if (!q.trim()) {
+      if (searchTimer) clearTimeout(searchTimer);
       set({ searchResults: null });
       return;
     }
-    try {
-      const results = await api.search(q);
-      set({ searchResults: results });
-    } catch (e) {
-      get().showToast(`搜索失败: ${e}`);
-    }
+    get().runSearch();
+  },
+
+  setSearchRole: (r) => {
+    set({ searchRole: r });
+    if (get().query.trim()) get().runSearch();
+  },
+
+  setSearchSince: (t) => {
+    set({ searchSince: t });
+    if (get().query.trim()) get().runSearch();
+  },
+
+  // 防抖 150ms 执行搜索，带竞态保护（仅当查询未变时应用结果）。
+  runSearch: () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(async () => {
+      const q = get().query.trim();
+      if (!q) {
+        set({ searchResults: null });
+        return;
+      }
+      try {
+        const results = await api.search(q, {
+          role: get().searchRole,
+          since: sinceISO(get().searchSince),
+        });
+        if (get().query.trim() === q) set({ searchResults: results });
+      } catch (e) {
+        get().showToast(`搜索失败: ${e}`);
+      }
+    }, 150);
   },
 
   toggleTool: (t) =>

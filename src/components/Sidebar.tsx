@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useStore } from "../store";
-import type { Project, SessionMeta } from "../types";
+import type { Project, SearchHit, SessionMeta } from "../types";
 import { ContextMenu, MenuEntry } from "./ContextMenu";
 import {
   IconChevron, IconCopy, IconEye, IconEyeOff, IconFolder, IconRefresh, IconReveal,
@@ -53,6 +53,14 @@ export function Sidebar({ width }: { width: number }) {
   const [hiddenOpen, setHiddenOpen] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [anchor, setAnchor] = useState<string | null>(null);
+  const [collapsedCwd, setCollapsedCwd] = useState<Set<string>>(new Set()); // 搜索态折叠的目录
+
+  const toggleSearchGroup = (cwd: string) =>
+    setCollapsedCwd((prev) => {
+      const n = new Set(prev);
+      n.has(cwd) ? n.delete(cwd) : n.add(cwd);
+      return n;
+    });
 
   const totalSessions = projects.reduce((a, p) => a + p.session_count, 0);
   const passTool = (s: SessionMeta) => toolFilter[s.tool];
@@ -143,10 +151,39 @@ export function Sidebar({ width }: { width: number }) {
     };
   };
 
+  // 搜索命中：标题行 + 正文片段行（F1）
+  const renderHits = (hits: SearchHit[], q: string) =>
+    hits.map((s) => {
+      const on = selected.has(s.file_path) || activeSession?.file_path === s.file_path;
+      return (
+        <div key={s.file_path} className="hit">
+          <div
+            className={`sess ${on ? "active" : ""}`}
+            onClick={(e) => onSessionClick(e, s, hits)}
+            onContextMenu={(e) => onSessionContext(e, s)}
+            title={s.title}
+          >
+            <span className={`tdot ${s.tool}`} />
+            <span className="st">{hl(s.title, q)}</span>
+            <span className="stime">{relativeTime(s.updated_at)}</span>
+          </div>
+          {s.snippet && (
+            <div
+              className="sess-snippet"
+              onClick={(e) => onSessionClick(e, s, hits)}
+              title={s.snippet}
+            >
+              {hl(s.snippet, q)}
+            </div>
+          )}
+        </div>
+      );
+    });
+
   // ---- 搜索态 ----
   const renderSearch = () => {
     const hits = (searchResults ?? []).filter(passTool);
-    const byCwd = new Map<string, SessionMeta[]>();
+    const byCwd = new Map<string, SearchHit[]>();
     for (const h of hits) {
       if (!byCwd.has(h.cwd)) byCwd.set(h.cwd, []);
       byCwd.get(h.cwd)!.push(h);
@@ -157,19 +194,26 @@ export function Sidebar({ width }: { width: number }) {
           搜索 “<span className="hint">{query}</span>” · {hits.length} 命中
         </div>
         {hits.length === 0 ? (
-          <div className="sess-empty">没有命中</div>
+          <div className="sess-empty">没有命中 · 试试更短的关键词，或调整上方工具/时间/角色过滤</div>
         ) : (
-          [...byCwd.entries()].map(([cwd, sessions]) => (
-            <div key={cwd}>
-              <div className="proj open" title={cwd}>
-                <span className="chev"><IconChevron size={12} /></span>
-                <span className="fi"><IconFolder /></span>
-                <span className="nm">{leafName(cwd)}</span>
-                <span className="ct">{sessions.length}</span>
+          [...byCwd.entries()].map(([cwd, sessions]) => {
+            const open = !collapsedCwd.has(cwd);
+            return (
+              <div key={cwd}>
+                <div
+                  className={`proj ${open ? "open" : ""}`}
+                  title={cwd}
+                  onClick={() => toggleSearchGroup(cwd)}
+                >
+                  <span className="chev"><IconChevron size={12} /></span>
+                  <span className="fi"><IconFolder /></span>
+                  <span className="nm">{leafName(cwd)}</span>
+                  <span className="ct">{sessions.length}</span>
+                </div>
+                {open && <div className="kids">{renderHits(sessions, query)}</div>}
               </div>
-              <div className="kids">{renderSessions(sessions, query)}</div>
-            </div>
-          ))
+            );
+          })
         )}
       </>
     );

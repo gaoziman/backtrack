@@ -2,8 +2,14 @@ import { useRef } from "react";
 import { useStore } from "../store";
 import { IconLogo, IconMoon, IconSearch } from "./icons";
 
+const SINCE_OPTS = [["all", "全部"], ["7d", "近7天"], ["30d", "近30天"]] as const;
+const ROLE_OPTS = [["all", "全部"], ["user", "我"], ["ai", "AI"]] as const;
+
 export function TopBar() {
-  const { query, setQuery, toolFilter, toggleTool, toggleTheme } = useStore();
+  const {
+    query, setQuery, toolFilter, toggleTool, toggleTheme,
+    searchRole, searchSince, setSearchRole, setSearchSince,
+  } = useStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
   // 暴露给 ⌘K
@@ -31,6 +37,32 @@ export function TopBar() {
       </div>
 
       <div className="topbar-actions">
+        {query.trim() && (
+          <div className="filters">
+            <div className="seg" role="group" aria-label="时间范围">
+              {SINCE_OPTS.map(([v, l]) => (
+                <button
+                  key={v}
+                  className={searchSince === v ? "on" : ""}
+                  onClick={() => setSearchSince(v)}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+            <div className="seg" role="group" aria-label="角色">
+              {ROLE_OPTS.map(([v, l]) => (
+                <button
+                  key={v}
+                  className={searchRole === v ? "on" : ""}
+                  onClick={() => setSearchRole(v)}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="tool-filter">
           {(["claude", "codex"] as const).map((t) => (
             <button

@@ -1,12 +1,19 @@
 // 封装 Tauri invoke 调用（Tauri v2 自动把 camelCase 映射为 Rust snake_case）。
 import { invoke } from "@tauri-apps/api/core";
-import type { Message, Project, ScanSummary, SessionMeta, Tool } from "./types";
+import type {
+  Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool,
+} from "./types";
 
 export const api = {
   scan: () => invoke<ScanSummary>("scan"),
   listProjects: () => invoke<Project[]>("list_projects"),
   listSessions: (cwd: string) => invoke<SessionMeta[]>("list_sessions", { cwd }),
-  search: (query: string) => invoke<SessionMeta[]>("search", { query }),
+  search: (query: string, opts?: { role?: SearchRole; since?: string | null }) =>
+    invoke<SearchHit[]>("search", {
+      query,
+      role: opts?.role ?? null,
+      since: opts?.since ?? null,
+    }),
   getTranscript: (filePath: string, tool: Tool) =>
     invoke<Message[]>("get_transcript", { filePath, tool }),
   resumeInTerminal: (cwd: string, command: string, terminal: string) =>

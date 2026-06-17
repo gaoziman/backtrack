@@ -28,6 +28,14 @@ export interface Message {
   tool_name: string | null;
 }
 
+/// 搜索命中 = 会话元数据 + 命中正文片段（仅标题命中时 snippet 为空）。
+export interface SearchHit extends SessionMeta {
+  snippet?: string | null;
+}
+
+export type SearchRole = "all" | "user" | "ai";
+export type SearchSince = "all" | "7d" | "30d";
+
 export interface ScanSummary {
   total: number;
   claude: number;
