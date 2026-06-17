@@ -1,6 +1,6 @@
 //! Tauri 命令层：前端通过 invoke 调用。
 use crate::indexer::{build_index, ScanSummary};
-use crate::models::{Message, Project, SessionMeta, Tool};
+use crate::models::{Message, Project, SearchHit, SessionMeta, Tool};
 use crate::parsers::{claude, codex};
 use crate::scanner::{default_claude_root, default_codex_root};
 use crate::store::Store;
@@ -51,13 +51,20 @@ pub fn list_sessions(state: State<'_, AppState>, cwd: String) -> Result<Vec<Sess
 }
 
 #[tauri::command]
-pub fn search(state: State<'_, AppState>, query: String) -> Result<Vec<SessionMeta>, String> {
+pub fn search(
+    state: State<'_, AppState>,
+    query: String,
+    role: Option<String>,
+    since: Option<String>,
+) -> Result<Vec<SearchHit>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(vec![]);
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    store.search(q).map_err(|e| e.to_string())
+    store
+        .search(q, role.as_deref(), since.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 /// 按需解析单个会话文件的完整对话（懒加载正文）。

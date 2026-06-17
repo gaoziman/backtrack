@@ -55,6 +55,15 @@ pub struct SessionMeta {
     pub resume_command: String,
 }
 
+/// 搜索命中：会话元数据 + 命中正文片段（仅标题命中时片段为 None）。
+/// `#[serde(flatten)]` 使前端拿到 = SessionMeta 全字段 + 额外 `snippet`。
+#[derive(Serialize, Clone, Debug)]
+pub struct SearchHit {
+    #[serde(flatten)]
+    pub meta: SessionMeta,
+    pub snippet: Option<String>,
+}
+
 /// 阅读器里的单条消息。
 #[derive(Serialize, Clone, Debug)]
 pub struct Message {

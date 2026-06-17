@@ -1,5 +1,5 @@
 //! 扫描 → 并行解析 → 写入 Store。
-use crate::models::{Message, SessionMeta, Tool};
+use crate::models::{Message, Role, SessionMeta, Tool};
 use crate::parsers::{claude, codex};
 use crate::scanner::{scan_files, ScanItem};
 use crate::store::Store;
@@ -13,13 +13,28 @@ pub struct ScanSummary {
     pub codex: usize,
 }
 
-/// 把消息拼成用于搜索的正文。
-fn body_of(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .map(|m| m.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+/// 把消息拼成用于搜索的三路正文：(合并, 用户, AI)。
+/// 合并供 LIKE 兜底与片段来源；用户/AI 供角色过滤。
+///
+/// **只索引对话正文（user / assistant 文本），排除工具调用与工具输出**：
+/// 工具输出（命令结果、文件 dump、大段 JSON）体积巨大且全文搜索价值低，
+/// 纳入 trigram 索引会使索引体积爆炸（实测 1500 会话曾达 2GB）。
+/// 工具内容仍可在阅读器里查看（get_transcript 不受影响），只是不进搜索索引。
+fn bodies_of(messages: &[Message]) -> (String, String, String) {
+    let (mut all, mut user, mut ai) = (Vec::new(), Vec::new(), Vec::new());
+    for m in messages {
+        // 跳过工具调用 / 工具结果
+        if m.tool_name.is_some() || matches!(m.role, Role::Tool) {
+            continue;
+        }
+        all.push(m.text.as_str());
+        match m.role {
+            Role::User => user.push(m.text.as_str()),
+            Role::Assistant => ai.push(m.text.as_str()),
+            Role::Tool => {}
+        }
+    }
+    (all.join("\n"), user.join("\n"), ai.join("\n"))
 }
 
 fn parse_item(item: &ScanItem) -> Option<(SessionMeta, Vec<Message>)> {
@@ -44,7 +59,8 @@ pub fn build_index(store: &Store, claude_root: &Path, codex_root: &Path) -> Scan
             Tool::Claude => summary.claude += 1,
             Tool::Codex => summary.codex += 1,
         }
-        let _ = store.upsert(meta, &body_of(msgs));
+        let (all, user, ai) = bodies_of(msgs);
+        let _ = store.upsert(meta, &all, &user, &ai);
     }
     summary.total = summary.claude + summary.codex;
     summary
@@ -86,7 +102,7 @@ mod tests {
         assert_eq!(summary.claude, 1);
         assert_eq!(summary.codex, 1);
         assert_eq!(store.count().unwrap(), 2);
-        assert_eq!(store.search("旅迹").unwrap().len(), 1);
+        assert_eq!(store.search("旅迹", None, None).unwrap().len(), 1);
         assert_eq!(store.list_projects().unwrap().len(), 2);
     }
 
@@ -107,10 +123,10 @@ mod tests {
         for p in projs.iter().take(5) {
             println!("  {} ({})", p.display_name, p.session_count);
         }
-        let hits = store.search("旅迹").unwrap();
+        let hits = store.search("旅迹", None, None).unwrap();
         println!("搜索「旅迹」命中 {} 个:", hits.len());
         for h in hits.iter().take(5) {
-            println!("  [{}] {} — {}", h.tool.as_str(), h.title, h.id);
+            println!("  [{}] {} — {}", h.meta.tool.as_str(), h.meta.title, h.meta.id);
         }
         assert!(sum.total > 0);
     }
