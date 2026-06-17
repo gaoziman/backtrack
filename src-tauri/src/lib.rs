@@ -1,4 +1,5 @@
 mod commands;
+mod export;
 mod indexer;
 mod models;
 mod parsers;
@@ -15,6 +16,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(|app| {
             // 启动文件监听：~/.claude 与 ~/.codex 变更时自动增量索引并通知前端刷新。
@@ -27,6 +29,7 @@ pub fn run() {
             commands::list_sessions,
             commands::search,
             commands::get_transcript,
+            commands::export_session,
             commands::resume_in_terminal,
             commands::delete_project,
             commands::delete_sessions,

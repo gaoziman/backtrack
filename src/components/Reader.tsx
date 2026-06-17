@@ -3,10 +3,10 @@ import { useStore } from "../store";
 import { Tag } from "./Tag";
 import { MessageView } from "./MessageView";
 import { FindBar } from "./FindBar";
-import { IconCopy, IconFolder, IconTerminal } from "./icons";
+import { IconCopy, IconDownload, IconFolder, IconTerminal } from "./icons";
 
 export function Reader() {
-  const { activeSession, transcript, loadingTranscript, copyCommand, openTerminal } = useStore();
+  const { activeSession, transcript, loadingTranscript, copyCommand, openTerminal, openExport } = useStore();
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [findOpen, setFindOpen] = useState(false);
 
@@ -68,6 +68,9 @@ export function Reader() {
           </div>
           <button className="btn" onClick={() => copyCommand(s.resume_command)}>
             <IconCopy size={13} /> 复制
+          </button>
+          <button className="btn" onClick={() => openExport(s)}>
+            <IconDownload size={13} /> 导出
           </button>
           <button className="btn primary" onClick={() => openTerminal(s)}>
             <IconTerminal size={13} /> 终端恢复

@@ -9,11 +9,13 @@ import { Toast } from "./components/Toast";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ManageDirs } from "./components/ManageDirs";
 import { RenameDialog } from "./components/RenameDialog";
+import { ExportDialog } from "./components/ExportDialog";
 
 export default function App() {
   const init = useStore((s) => s.init);
   const closeTerminal = useStore((s) => s.closeTerminal);
   const cancelDelete = useStore((s) => s.cancelDelete);
+  const closeExport = useStore((s) => s.closeExport);
   const [sideW, setSideW] = useState(288);
   const dragging = useRef(false);
 
@@ -42,11 +44,12 @@ export default function App() {
       if (e.key === "Escape") {
         closeTerminal();
         cancelDelete();
+        closeExport();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [closeTerminal, cancelDelete]);
+  }, [closeTerminal, cancelDelete, closeExport]);
 
   // 左栏拖拽改宽（220–380）
   const startResize = (e: React.MouseEvent) => {
@@ -81,6 +84,7 @@ export default function App() {
       <ConfirmDialog />
       <ManageDirs />
       <RenameDialog />
+      <ExportDialog />
       <Toast />
     </div>
   );

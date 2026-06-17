@@ -1,4 +1,5 @@
 //! Tauri 命令层：前端通过 invoke 调用。
+use crate::export::{self, ExportFormat};
 use crate::indexer::{build_index, ScanSummary};
 use crate::models::{Message, Project, SearchHit, SessionMeta, Tool};
 use crate::parsers::{claude, codex};
@@ -56,6 +57,8 @@ pub fn search(
     query: String,
     role: Option<String>,
     since: Option<String>,
+    tools: Option<Vec<String>>,
+    cwd: Option<String>,
 ) -> Result<Vec<SearchHit>, String> {
     let q = query.trim();
     if q.is_empty() {
@@ -63,22 +66,79 @@ pub fn search(
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store
-        .search(q, role.as_deref(), since.as_deref())
+        .search_filtered(
+            q,
+            role.as_deref(),
+            since.as_deref(),
+            tools.as_deref(),
+            cwd.as_deref(),
+        )
         .map_err(|e| e.to_string())
 }
 
 /// 按需解析单个会话文件的完整对话（懒加载正文）。
 #[tauri::command]
 pub fn get_transcript(file_path: String, tool: String) -> Result<Vec<Message>, String> {
-    let path = PathBuf::from(&file_path);
-    let parsed = match Tool::from_str(&tool) {
+    parse_transcript(&file_path, &tool).map(|(_, msgs)| msgs)
+}
+
+/// 解析会话文件 → (SessionMeta, Vec<Message>)。get_transcript 与 export_session 共用。
+fn parse_transcript(file_path: &str, tool: &str) -> Result<(SessionMeta, Vec<Message>), String> {
+    let path = PathBuf::from(file_path);
+    let parsed = match Tool::from_str(tool) {
         Some(Tool::Claude) => claude::parse_claude(&path),
         Some(Tool::Codex) => codex::parse_codex(&path),
         None => return Err(format!("未知工具类型: {}", tool)),
     };
-    parsed
-        .map(|(_, msgs)| msgs)
-        .ok_or_else(|| format!("无法解析会话文件: {}", file_path))
+    parsed.ok_or_else(|| format!("无法解析会话文件: {}", file_path))
+}
+
+/// 导出单会话为 Markdown/HTML。弹「另存为」对话框；用户取消返回 Ok(None)。
+/// 成功返回 Ok(Some(保存路径))。仅读取原始 jsonl，绝不修改。
+/// title 为前端已 override 的自定义/派生标题，用于文档标题与默认文件名。
+///
+/// 注意：声明为 async，使其不在主线程执行；并用**非阻塞**的 `save_file` 回调，
+/// 避免阻塞 UI 线程导致整个应用卡死（blocking_save_file 不可用于主线程）。
+#[tauri::command]
+pub async fn export_session(
+    app: tauri::AppHandle,
+    file_path: String,
+    tool: String,
+    title: String,
+    format: String,
+    include_tools: bool,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let fmt = ExportFormat::from_str(&format).ok_or_else(|| format!("未知导出格式: {}", format))?;
+    let (mut meta, messages) = parse_transcript(&file_path, &tool)?;
+    // 用前端传入的标题（可能是用户自定义标题）覆盖派生标题。
+    if !title.trim().is_empty() {
+        meta.title = title;
+    }
+
+    let content = export::render(&meta, &messages, fmt, include_tools);
+    let default_name = export::safe_file_name(&meta.title, fmt.ext());
+
+    // 非阻塞「另存为」：通过回调拿到用户选择，channel 异步等待，不占用主线程。
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .file()
+        .set_file_name(&default_name)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let chosen = rx.recv().map_err(|e| format!("对话框通道错误: {}", e))?;
+
+    let Some(file_path) = chosen else {
+        return Ok(None); // 用户取消，静默。
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("无效的保存路径: {}", e))?;
+
+    std::fs::write(&path, content).map_err(|e| format!("写入文件失败: {}", e))?;
+    Ok(Some(path.to_string_lossy().to_string()))
 }
 
 #[tauri::command]

@@ -2,21 +2,41 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool,
+  Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool, ExportFormat,
 } from "./types";
 
 export const api = {
   scan: () => invoke<ScanSummary>("scan"),
   listProjects: () => invoke<Project[]>("list_projects"),
   listSessions: (cwd: string) => invoke<SessionMeta[]>("list_sessions", { cwd }),
-  search: (query: string, opts?: { role?: SearchRole; since?: string | null }) =>
+  search: (
+    query: string,
+    opts?: { role?: SearchRole; since?: string | null; tools?: Tool[]; cwd?: string | null },
+  ) =>
     invoke<SearchHit[]>("search", {
       query,
       role: opts?.role ?? null,
       since: opts?.since ?? null,
+      tools: opts?.tools ?? null,
+      cwd: opts?.cwd ?? null,
     }),
   getTranscript: (filePath: string, tool: Tool) =>
     invoke<Message[]>("get_transcript", { filePath, tool }),
+  // 导出单会话为 md/html；弹「另存为」对话框。返回保存路径，用户取消时为 null。
+  exportSession: (
+    filePath: string,
+    tool: Tool,
+    title: string,
+    format: ExportFormat,
+    includeTools: boolean,
+  ) =>
+    invoke<string | null>("export_session", {
+      filePath,
+      tool,
+      title,
+      format,
+      includeTools,
+    }),
   resumeInTerminal: (cwd: string, command: string, terminal: string) =>
     invoke<void>("resume_in_terminal", { cwd, command, terminal }),
   deleteProject: (cwd: string) => invoke<number>("delete_project", { cwd }),

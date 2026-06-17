@@ -35,6 +35,7 @@ export interface SearchHit extends SessionMeta {
 
 export type SearchRole = "all" | "user" | "ai";
 export type SearchSince = "all" | "7d" | "30d";
+export type ExportFormat = "md" | "html";
 
 export interface ScanSummary {
   total: number;

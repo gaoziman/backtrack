@@ -261,6 +261,11 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: va
 .term-opt.sel .d2 { background: var(--accent); }
 .term-opt .tk { font-size: 12px; font-weight: 600; }
 .term-opt .sk2 { font-size: 10.5px; color: var(--faint); }
+.export-opt { display: flex; align-items: center; gap: 9px; margin-top: 14px; font-size: 12.5px; color: var(--text-mid); cursor: pointer; user-select: none; }
+.export-opt input { position: absolute; opacity: 0; width: 0; height: 0; }
+.export-opt .box { width: 17px; height: 17px; border-radius: 5px; border: 1px solid var(--border); display: grid; place-items: center; color: #fff; transition: background .12s, border-color .12s; flex: none; }
+.export-opt input:checked + .box { background: var(--accent); border-color: var(--accent); }
+.export-opt input:focus-visible + .box { box-shadow: 0 0 0 3px var(--accent-dim); }
 .modal-foot { padding: 13px 18px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; background: var(--panel-2); }
 .rename-input { width: 100%; height: 34px; padding: 0 11px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-hi); font-family: var(--sans); font-size: 13px; outline: none; transition: border-color .15s, box-shadow .15s; }
 .rename-input::placeholder { color: var(--faint); }
@@ -271,23 +276,48 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: va
 
 /* ---------- 搜索升级：命中片段 / 过滤器 / 会话内查找 ---------- */
 
-/* F1 搜索结果命中片段行 */
-.sess-snippet {
-  padding: 0 9px 7px 34px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--text-lo);
+/* F1 搜索结果列表（方案 C · 块条目）—— 每条独立圆角块、hover 描边、命中高亮收敛 */
+.hit {
+  margin: 3px 8px;
+  padding: 8px 12px;
+  border-radius: 7px;
+  border: 1px solid transparent;
   cursor: pointer;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  position: relative;
 }
-.hit:hover .sess-snippet { color: var(--text-mid); }
-.sess-snippet mark { font-size: 11px; }
+.hit:hover { background: var(--hover); border-color: var(--border); }
+.hit.active { background: var(--active); border-color: var(--border-2); }
+.hit .hrow { display: flex; align-items: center; gap: 8px; }
+.hit .tool-dot { width: 6px; height: 6px; border-radius: 2px; flex-shrink: 0; }
+.hit .tool-dot.claude { background: var(--claude); }
+.hit .tool-dot.codex { background: var(--codex); }
+.hit .htitle {
+  flex: 1; min-width: 0;
+  font-size: 12.5px; font-weight: 550; color: var(--text-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hit.active .htitle { font-weight: 600; }
+.hit .htime { flex-shrink: 0; font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.hit .hsnip {
+  margin-top: 4px;
+  font-size: 11px; line-height: 1.55; color: var(--text-lo);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hit:hover .hsnip { color: var(--text-mid); }
+/* 命中高亮收敛：变色 + 轻下划线，不用实心色块（仅限搜索列表内，不影响阅读器 mark） */
+.hit mark {
+  background: none; color: var(--accent-hi); font-weight: 600;
+  padding: 0; border-radius: 0;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  text-underline-offset: 2px;
+}
 
 /* F3 顶栏搜索过滤器（复用 .seg 风格） */
 .filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dir-filter { font: 550 11px var(--sans); color: var(--text-hi); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; cursor: pointer; max-width: 160px; }
+.dir-filter:hover { border-color: var(--accent); }
+.dir-filter:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
 
 /* F2 会话内查找浮层 */
 .reader-main { position: relative; flex: 1; display: flex; flex-direction: column; min-height: 0; }

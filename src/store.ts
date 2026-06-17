@@ -2,7 +2,7 @@
 import { create } from "zustand";
 import { api } from "./api";
 import type {
-  Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool,
+  Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool, ExportFormat,
 } from "./types";
 
 type Theme = "dark" | "light";
@@ -33,6 +33,7 @@ interface AppState {
   searchResults: SearchHit[] | null; // null = 非搜索态
   searchRole: SearchRole;
   searchSince: SearchSince;
+  searchCwd: string; // "" = 全部目录
 
   // UI
   toolFilter: { claude: boolean; codex: boolean };
@@ -47,6 +48,7 @@ interface AppState {
   terminalModal: SessionMeta | null;
   confirmDelete: Project | null;
   renameTarget: SessionMeta | null;
+  exportTarget: SessionMeta | null;
 
   // actions
   init: () => Promise<void>;
@@ -65,9 +67,13 @@ interface AppState {
   openRename: (s: SessionMeta) => void;
   closeRename: () => void;
   renameSession: (filePath: string, title: string) => Promise<void>;
+  openExport: (s: SessionMeta) => void;
+  closeExport: () => void;
+  doExport: (format: ExportFormat, includeTools: boolean) => Promise<void>;
   setQuery: (q: string) => void;
   setSearchRole: (r: SearchRole) => void;
   setSearchSince: (t: SearchSince) => void;
+  setSearchCwd: (cwd: string) => void;
   runSearch: () => void;
   toggleTool: (t: Tool) => void;
   toggleTheme: () => void;
@@ -96,6 +102,7 @@ export const useStore = create<AppState>((set, get) => ({
   searchResults: null,
   searchRole: "all",
   searchSince: "all",
+  searchCwd: "",
   toolFilter: { claude: true, codex: true },
   theme: "light",
   scanning: false,
@@ -106,6 +113,7 @@ export const useStore = create<AppState>((set, get) => ({
   terminalModal: null,
   confirmDelete: null,
   renameTarget: null,
+  exportTarget: null,
 
   init: async () => {
     set({ scanning: true });
@@ -269,6 +277,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (get().query.trim()) get().runSearch();
   },
 
+  setSearchCwd: (cwd) => {
+    set({ searchCwd: cwd });
+    if (get().query.trim()) get().runSearch();
+  },
+
   // 防抖 150ms 执行搜索，带竞态保护（仅当查询未变时应用结果）。
   runSearch: () => {
     if (searchTimer) clearTimeout(searchTimer);
@@ -279,9 +292,13 @@ export const useStore = create<AppState>((set, get) => ({
         return;
       }
       try {
+        const tf = get().toolFilter;
+        const tools = (["claude", "codex"] as const).filter((t) => tf[t]);
         const results = await api.search(q, {
           role: get().searchRole,
           since: sinceISO(get().searchSince),
+          tools,
+          cwd: get().searchCwd || null,
         });
         if (get().query.trim() === q) set({ searchResults: results });
       } catch (e) {
@@ -290,8 +307,10 @@ export const useStore = create<AppState>((set, get) => ({
     }, 150);
   },
 
-  toggleTool: (t) =>
-    set((s) => ({ toolFilter: { ...s.toolFilter, [t]: !s.toolFilter[t] } })),
+  toggleTool: (t) => {
+    set((s) => ({ toolFilter: { ...s.toolFilter, [t]: !s.toolFilter[t] } }));
+    if (get().query.trim()) get().runSearch();
+  },
 
   toggleTheme: () => {
     const next: Theme = get().theme === "dark" ? "light" : "dark";
@@ -422,6 +441,26 @@ export const useStore = create<AppState>((set, get) => ({
       await api.revealInFinder(path, reveal);
     } catch (e) {
       get().showToast(`打开 Finder 失败: ${e}`);
+    }
+  },
+
+  openExport: (s) => set({ exportTarget: s }),
+  closeExport: () => set({ exportTarget: null }),
+  doExport: async (format, includeTools) => {
+    const s = get().exportTarget;
+    if (!s) return;
+    try {
+      const path = await api.exportSession(s.file_path, s.tool, s.title, format, includeTools);
+      set({ exportTarget: null });
+      if (path) {
+        get().showToast(`已导出 · ${leaf(path)}`);
+        // 在 Finder 中定位导出的文件
+        await get().revealInFinder(path, true);
+      }
+      // path 为 null = 用户取消另存为，静默。
+    } catch (e) {
+      set({ exportTarget: null });
+      get().showToast(`导出失败: ${e}`);
     }
   },
 
