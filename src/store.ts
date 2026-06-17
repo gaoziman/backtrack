@@ -46,10 +46,12 @@ interface AppState {
   toast: string | null;
   terminalModal: SessionMeta | null;
   confirmDelete: Project | null;
+  renameTarget: SessionMeta | null;
 
   // actions
   init: () => Promise<void>;
   rescan: () => Promise<void>;
+  silentRefresh: () => Promise<void>;
   refreshLists: () => Promise<void>;
   toggleProject: (path: string) => Promise<void>;
   hideProject: (p: Project) => Promise<void>;
@@ -60,6 +62,9 @@ interface AppState {
   deleteSessions: (paths: string[]) => Promise<void>;
   revealInFinder: (path: string, reveal: boolean) => Promise<void>;
   selectSession: (s: SessionMeta) => Promise<void>;
+  openRename: (s: SessionMeta) => void;
+  closeRename: () => void;
+  renameSession: (filePath: string, title: string) => Promise<void>;
   setQuery: (q: string) => void;
   setSearchRole: (r: SearchRole) => void;
   setSearchSince: (t: SearchSince) => void;
@@ -100,6 +105,7 @@ export const useStore = create<AppState>((set, get) => ({
   toast: null,
   terminalModal: null,
   confirmDelete: null,
+  renameTarget: null,
 
   init: async () => {
     set({ scanning: true });
@@ -152,6 +158,33 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  // 文件监听触发的静默刷新：不置 scanning、不弹 toast、保留当前选中会话与展开态。
+  // 区别于 rescan：后端已完成增量索引，前端仅刷新数据源 + 重载已展开项目会话。
+  silentRefresh: async () => {
+    await get().refreshLists();
+    const expanded = Object.keys(get().expanded).filter((p) => get().expanded[p]);
+    const active = get().activeSession;
+    const toLoad = new Set(expanded);
+    if (active) toLoad.add(active.cwd); // 便于校验当前会话是否仍存在
+    const cache: Record<string, SessionMeta[]> = {};
+    for (const p of toLoad) {
+      try {
+        cache[p] = await api.listSessions(p);
+      } catch {
+        /* 跳过加载失败的项目 */
+      }
+    }
+    // 合并更新（保留未重载项目的旧缓存，避免折叠项目缓存丢失）。
+    set((s) => ({ sessionsByProject: { ...s.sessionsByProject, ...cache } }));
+    // 当前会话若已被删除（其文件不在刷新后的列表里）→ 回空态。
+    if (active) {
+      const list = cache[active.cwd];
+      if (list && !list.some((x) => x.file_path === active.file_path)) {
+        set({ activeSession: null, transcript: [] });
+      }
+    }
+  },
+
   toggleProject: async (path) => {
     const isOpen = !!get().expanded[path];
     if (isOpen) {
@@ -182,6 +215,37 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       set({ loadingTranscript: false });
       get().showToast(`加载对话失败: ${e}`);
+    }
+  },
+
+  openRename: (s) => set({ renameTarget: s }),
+  closeRename: () => set({ renameTarget: null }),
+
+  // 重命名标题：调后端拿生效标题，就地更新列表/当前会话/搜索结果，不触发重扫。
+  renameSession: async (filePath, title) => {
+    try {
+      const effective = await api.renameSession(filePath, title);
+      const sbp = { ...get().sessionsByProject };
+      for (const k of Object.keys(sbp)) {
+        sbp[k] = sbp[k].map((s) =>
+          s.file_path === filePath ? { ...s, title: effective } : s
+        );
+      }
+      const patch: any = { sessionsByProject: sbp, renameTarget: null };
+      const active = get().activeSession;
+      if (active && active.file_path === filePath) {
+        patch.activeSession = { ...active, title: effective };
+      }
+      const sr = get().searchResults;
+      if (sr) {
+        patch.searchResults = sr.map((s) =>
+          s.file_path === filePath ? { ...s, title: effective } : s
+        );
+      }
+      set(patch);
+      get().showToast(title.trim() ? "已重命名" : "已恢复默认标题");
+    } catch (e) {
+      get().showToast(`重命名失败: ${e}`);
     }
   },
 

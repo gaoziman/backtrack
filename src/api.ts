@@ -1,5 +1,6 @@
 // 封装 Tauri invoke 调用（Tauri v2 自动把 camelCase 映射为 Rust snake_case）。
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool,
 } from "./types";
@@ -28,4 +29,10 @@ export const api = {
   setStarredAll: (cwds: string[]) => invoke<void>("set_starred_all", { cwds }),
   revealInFinder: (path: string, reveal: boolean) =>
     invoke<void>("reveal_in_finder", { path, reveal }),
+  // 重命名会话标题（空字符串=恢复默认）；返回生效后的标题。
+  renameSession: (filePath: string, title: string) =>
+    invoke<string>("rename_session", { filePath, title }),
+  // 订阅后端「索引已更新」事件（文件监听自动刷新）。返回取消订阅函数。
+  onIndexUpdated: (cb: (s: ScanSummary) => void): Promise<UnlistenFn> =>
+    listen<ScanSummary>("index-updated", (e) => cb(e.payload)),
 };

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
+import { api } from "./api";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
 import { Reader } from "./components/Reader";
@@ -7,6 +8,7 @@ import { TerminalModal } from "./components/TerminalModal";
 import { Toast } from "./components/Toast";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ManageDirs } from "./components/ManageDirs";
+import { RenameDialog } from "./components/RenameDialog";
 
 export default function App() {
   const init = useStore((s) => s.init);
@@ -18,6 +20,17 @@ export default function App() {
   useEffect(() => {
     init();
   }, [init]);
+
+  // 监听后端「索引已更新」事件（文件监听自动刷新），静默刷新列表。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    api
+      .onIndexUpdated(() => useStore.getState().silentRefresh())
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => unlisten?.();
+  }, []);
 
   // 全局快捷键：⌘K 聚焦搜索，Esc 关闭弹窗
   useEffect(() => {
@@ -67,6 +80,7 @@ export default function App() {
       <TerminalModal />
       <ConfirmDialog />
       <ManageDirs />
+      <RenameDialog />
       <Toast />
     </div>
   );

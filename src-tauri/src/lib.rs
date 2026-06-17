@@ -5,6 +5,7 @@ mod parsers;
 mod scanner;
 mod store;
 mod terminal;
+mod watcher;
 
 use commands::AppState;
 
@@ -15,6 +16,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
+        .setup(|app| {
+            // 启动文件监听：~/.claude 与 ~/.codex 变更时自动增量索引并通知前端刷新。
+            watcher::spawn_watcher(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::scan,
             commands::list_projects,
@@ -30,6 +36,7 @@ pub fn run() {
             commands::list_starred,
             commands::set_star,
             commands::set_starred_all,
+            commands::rename_session,
             commands::reveal_in_finder,
         ])
         .run(tauri::generate_context!())
