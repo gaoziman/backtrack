@@ -22,13 +22,20 @@ impl Tool {
             _ => None,
         }
     }
-    /// 该工具的 resume 命令模板。
+    /// 该工具的 resume 命令模板。id 经 shell 单引号安全转义，防止特殊字符注入。
     pub fn resume_command(&self, id: &str) -> String {
+        let safe = shell_single_quote(id);
         match self {
-            Tool::Claude => format!("claude --resume {}", id),
-            Tool::Codex => format!("codex resume {}", id),
+            Tool::Claude => format!("claude --resume {}", safe),
+            Tool::Codex => format!("codex resume {}", safe),
         }
     }
+}
+
+/// 用单引号包裹字符串供 shell 使用，内部单引号转义为 `'\''`。
+/// 例：`abc` → `'abc'`；`a'b` → `'a'\''b'`；`$(x)` → `'$(x)'`（不被 shell 展开）。
+pub fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -103,8 +110,36 @@ mod tests {
 
     #[test]
     fn resume_command_per_tool() {
-        assert_eq!(Tool::Claude.resume_command("abc"), "claude --resume abc");
-        assert_eq!(Tool::Codex.resume_command("abc"), "codex resume abc");
+        // 正常 UUID：包一对单引号，shell 行为等价、安全（回归 AC7）。
+        assert_eq!(Tool::Claude.resume_command("abc"), "claude --resume 'abc'");
+        assert_eq!(Tool::Codex.resume_command("abc"), "codex resume 'abc'");
+        // 典型 UUID 形态
+        assert_eq!(
+            Tool::Claude.resume_command("5725ab12-cce7-4f1e-8820-60b1dd6dc906"),
+            "claude --resume '5725ab12-cce7-4f1e-8820-60b1dd6dc906'"
+        );
+    }
+
+    /// R1 安全：含 shell 元字符的 id 被安全转义，不会被执行。
+    #[test]
+    fn resume_command_escapes_shell_metachars() {
+        // 命令替换 $() 被单引号包裹，不展开
+        let cmd = Tool::Claude.resume_command("$(rm -rf /)");
+        assert_eq!(cmd, "claude --resume '$(rm -rf /)'");
+        // 内嵌单引号被正确转义
+        let cmd = Tool::Codex.resume_command("a'b");
+        assert_eq!(cmd, "codex resume 'a'\\''b'");
+        // 反引号、分号
+        let cmd = Tool::Claude.resume_command("x`whoami`;ls");
+        assert_eq!(cmd, "claude --resume 'x`whoami`;ls'");
+    }
+
+    #[test]
+    fn shell_single_quote_basics() {
+        assert_eq!(shell_single_quote("abc"), "'abc'");
+        assert_eq!(shell_single_quote(""), "''");
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_single_quote("$(x)"), "'$(x)'");
     }
 
     #[test]

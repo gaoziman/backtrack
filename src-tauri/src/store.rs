@@ -333,18 +333,32 @@ impl Store {
         role: Option<&str>,
         since: Option<&str>,
     ) -> rusqlite::Result<Vec<SearchHit>> {
+        self.search_filtered(query, role, since, None, None)
+    }
+
+    /// 全文搜索 + 多维过滤（role/since/tools/cwd 全部 AND，后端完成）。
+    /// `tools`: 选中的工具列表；None 或含全部(>=2)=不过滤工具。
+    /// `cwd`: 目录过滤；None/空=不过滤。
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        role: Option<&str>,
+        since: Option<&str>,
+        tools: Option<&[String]>,
+        cwd: Option<&str>,
+    ) -> rusqlite::Result<Vec<SearchHit>> {
         let q = query.trim();
         if q.is_empty() {
             return Ok(vec![]);
         }
         let rows = if self.has_fts && q.chars().count() >= TRIGRAM_MIN {
             // FTS 若遇极端输入异常，兜底回退 LIKE，保证搜索永不因引擎报错而失败。
-            match self.fts_search(q, role, since) {
+            match self.fts_search(q, role, since, tools, cwd) {
                 Ok(r) => r,
-                Err(_) => self.like_search(q, role, since)?,
+                Err(_) => self.like_search(q, role, since, tools, cwd)?,
             }
         } else {
-            self.like_search(q, role, since)?
+            self.like_search(q, role, since, tools, cwd)?
         };
         Ok(rows
             .into_iter()
@@ -360,20 +374,29 @@ impl Store {
         q: &str,
         role: Option<&str>,
         since: Option<&str>,
+        tools: Option<&[String]>,
+        cwd: Option<&str>,
     ) -> rusqlite::Result<Vec<(SessionMeta, String)>> {
         let match_expr = fts_match_expr(role, q);
+        let (filter_sql, filter_params) = build_filters(tools, cwd);
         // 注意：FTS5 的 MATCH 左操作数须为表名（非别名），rank 同理。
-        let mut stmt = self.conn.prepare(
+        let sql = format!(
             "SELECT s.id, s.tool, s.cwd, s.file_path,
                     COALESCE(ct.title, s.title) AS title,
                     s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
              FROM sessions_fts
              JOIN sessions s ON s.file_path = sessions_fts.file_path
              LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
-             WHERE sessions_fts MATCH ?1 AND (?2 IS NULL OR s.updated_at >= ?2)
-             ORDER BY sessions_fts.rank LIMIT 200",
-        )?;
-        let rows = stmt.query_map(params![match_expr, since], Self::row_to_meta_body)?;
+             WHERE sessions_fts MATCH ? AND (? IS NULL OR s.updated_at >= ?){filter_sql}
+             ORDER BY sessions_fts.rank LIMIT 200"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        // 参数顺序：match_expr, since, since, 然后 filter 参数
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&match_expr, &since, &since];
+        for p in &filter_params {
+            params.push(p.as_ref());
+        }
+        let rows = stmt.query_map(params.as_slice(), Self::row_to_meta_body)?;
         rows.collect()
     }
 
@@ -382,24 +405,38 @@ impl Store {
         q: &str,
         role: Option<&str>,
         since: Option<&str>,
+        tools: Option<&[String]>,
+        cwd: Option<&str>,
     ) -> rusqlite::Result<Vec<(SessionMeta, String)>> {
         let like = format!("%{}%", escape_like(q));
         let where_role = match role {
-            Some("user") => "(s.title LIKE ?1 ESCAPE '\\' OR s.body_user LIKE ?1 ESCAPE '\\')",
-            Some("ai") => "s.body_ai LIKE ?1 ESCAPE '\\'",
-            _ => "(s.title LIKE ?1 ESCAPE '\\' OR s.body LIKE ?1 ESCAPE '\\')",
+            Some("user") => "(s.title LIKE ? ESCAPE '\\' OR s.body_user LIKE ? ESCAPE '\\')",
+            Some("ai") => "s.body_ai LIKE ? ESCAPE '\\'",
+            _ => "(s.title LIKE ? ESCAPE '\\' OR s.body LIKE ? ESCAPE '\\')",
         };
+        let role_param_count = if matches!(role, Some("ai")) { 1 } else { 2 };
+        let (filter_sql, filter_params) = build_filters(tools, cwd);
         let sql = format!(
             "SELECT s.id, s.tool, s.cwd, s.file_path,
                     COALESCE(ct.title, s.title) AS title,
                     s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
              FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
              WHERE {where_role}
-             AND (?2 IS NULL OR s.updated_at >= ?2)
+             AND (? IS NULL OR s.updated_at >= ?){filter_sql}
              ORDER BY s.updated_at DESC LIMIT 200"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![like, since], Self::row_to_meta_body)?;
+        // 参数顺序：like × role_param_count, since, since, 然后 filter 参数
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![];
+        for _ in 0..role_param_count {
+            params.push(&like);
+        }
+        params.push(&since);
+        params.push(&since);
+        for p in &filter_params {
+            params.push(p.as_ref());
+        }
+        let rows = stmt.query_map(params.as_slice(), Self::row_to_meta_body)?;
         rows.collect()
     }
 
@@ -434,6 +471,31 @@ fn escape_like(q: &str) -> String {
     q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// 构造 tool/cwd 过滤的 SQL 片段（追加到 WHERE 后）+ 对应参数（全部 ? 占位，防注入）。
+/// tools 为 None 或包含 >=2 项（全选）时不过滤工具；cwd 为 None/空时不过滤目录。
+fn build_filters(
+    tools: Option<&[String]>,
+    cwd: Option<&str>,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut sql = String::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(ts) = tools {
+        // 只在恰好选 1 个工具时过滤；0 个或 >=2 个（全选）= 不限制。
+        if ts.len() == 1 {
+            sql.push_str(" AND s.tool = ?");
+            params.push(Box::new(ts[0].clone()));
+        }
+    }
+    if let Some(c) = cwd {
+        if !c.is_empty() {
+            sql.push_str(" AND s.cwd = ?");
+            params.push(Box::new(c.to_string()));
+        }
+    }
+    (sql, params)
+}
+
 /// 从合并正文里按 query 截取单行片段（命中词左右各 `radius` 字符，CJK 字符安全）。
 /// 找不到（如仅标题命中）→ None。大小写不敏感（ASCII）。
 fn snippet_rust(body: &str, q: &str, radius: usize) -> Option<String> {
@@ -464,12 +526,16 @@ mod tests {
     use super::*;
 
     fn meta(id: &str, cwd: &str, title: &str, updated: &str) -> SessionMeta {
+        meta_tool(id, cwd, title, updated, Tool::Claude)
+    }
+
+    fn meta_tool(id: &str, cwd: &str, title: &str, updated: &str, tool: Tool) -> SessionMeta {
         SessionMeta {
-            id: id.into(), tool: Tool::Claude, cwd: cwd.into(),
+            id: id.into(), tool, cwd: cwd.into(),
             file_path: format!("/f/{}", id), title: title.into(),
             started_at: "2026-01-01".into(), updated_at: updated.into(),
             message_count: 3, forked_from: None,
-            resume_command: Tool::Claude.resume_command(id),
+            resume_command: tool.resume_command(id),
         }
     }
 
@@ -568,6 +634,75 @@ mod tests {
         let recent = s.search("检索目标", None, Some("2026-03-01")).unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].meta.id, "new");
+    }
+
+    /// 工具过滤：只搜 claude / 只搜 codex / 都选则不限制。
+    #[test]
+    fn search_filters_by_tool() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta_tool("a", "/p/ai", "标题", "2026-06-16", Tool::Claude), "共同关键词 检索目标");
+        up(&s, &meta_tool("b", "/p/ai", "标题", "2026-06-15", Tool::Codex), "共同关键词 检索目标");
+
+        // 只选 claude
+        let only_claude = vec!["claude".to_string()];
+        let r = s.search_filtered("检索目标", None, None, Some(&only_claude), None).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].meta.id, "a");
+        // 只选 codex
+        let only_codex = vec!["codex".to_string()];
+        let r = s.search_filtered("检索目标", None, None, Some(&only_codex), None).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].meta.id, "b");
+        // 两个都选 → 不限制
+        let both = vec!["claude".to_string(), "codex".to_string()];
+        let r = s.search_filtered("检索目标", None, None, Some(&both), None).unwrap();
+        assert_eq!(r.len(), 2);
+        // None → 不限制
+        let r = s.search_filtered("检索目标", None, None, None, None).unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    /// 目录过滤：限定某 cwd。
+    #[test]
+    fn search_filters_by_cwd() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "标题", "2026-06-16"), "共同关键词 检索目标");
+        up(&s, &meta("b", "/p/hub", "标题", "2026-06-15"), "共同关键词 检索目标");
+
+        let r = s.search_filtered("检索目标", None, None, None, Some("/p/ai")).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].meta.cwd, "/p/ai");
+        // 空字符串 = 不过滤
+        let r = s.search_filtered("检索目标", None, None, None, Some("")).unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    /// 组合过滤：tool + cwd + since 同时生效（AND）。
+    #[test]
+    fn search_combined_filters() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta_tool("a", "/p/ai", "标题", "2026-06-16T00:00:00Z", Tool::Claude), "共同关键词 检索目标");
+        up(&s, &meta_tool("b", "/p/ai", "标题", "2026-01-01T00:00:00Z", Tool::Claude), "共同关键词 检索目标");
+        up(&s, &meta_tool("c", "/p/hub", "标题", "2026-06-16T00:00:00Z", Tool::Claude), "共同关键词 检索目标");
+        up(&s, &meta_tool("d", "/p/ai", "标题", "2026-06-16T00:00:00Z", Tool::Codex), "共同关键词 检索目标");
+
+        // claude + /p/ai + since 2026-03 → 只有 a
+        let claude = vec!["claude".to_string()];
+        let r = s.search_filtered("检索目标", None, Some("2026-03-01"), Some(&claude), Some("/p/ai")).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].meta.id, "a");
+    }
+
+    /// 工具过滤在 LIKE 兜底路径（CJK 2 字）也生效。
+    #[test]
+    fn search_tool_filter_works_in_like_path() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta_tool("a", "/p/ai", "旅迹", "2026-06-16", Tool::Claude), "x");
+        up(&s, &meta_tool("b", "/p/ai", "旅迹", "2026-06-15", Tool::Codex), "y");
+        let only_claude = vec!["claude".to_string()];
+        let r = s.search_filtered("旅迹", None, None, Some(&only_claude), None).unwrap(); // 2 字 → LIKE
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].meta.id, "a");
     }
 
     /// 安全：含 FTS 特殊字符的查询不报错（按字面匹配）。

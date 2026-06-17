@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(meta.cwd, "/Users/leo/proj");
         assert_eq!(meta.title, "hi");
         assert_eq!(meta.message_count, 3);
-        assert_eq!(meta.resume_command, "claude --resume 754a4be0");
+        assert_eq!(meta.resume_command, "claude --resume '754a4be0'");
         assert_eq!(meta.started_at, "2026-06-16T01:00:00Z");
         assert_eq!(meta.updated_at, "2026-06-16T01:00:10Z");
 

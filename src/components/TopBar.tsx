@@ -9,6 +9,7 @@ export function TopBar() {
   const {
     query, setQuery, toolFilter, toggleTool, toggleTheme,
     searchRole, searchSince, setSearchRole, setSearchSince,
+    searchCwd, setSearchCwd, projects,
   } = useStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -61,6 +62,19 @@ export function TopBar() {
                 </button>
               ))}
             </div>
+            <select
+              className="dir-filter"
+              aria-label="按目录过滤"
+              value={searchCwd}
+              onChange={(e) => setSearchCwd(e.target.value)}
+            >
+              <option value="">全部目录</option>
+              {projects.map((p) => (
+                <option key={p.path} value={p.path}>
+                  {p.display_name}
+                </option>
+              ))}
+            </select>
           </div>
         )}
         <div className="tool-filter">

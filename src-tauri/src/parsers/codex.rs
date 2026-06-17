@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(meta.cwd, "/Users/leo/hub");
         assert_eq!(meta.forked_from.as_deref(), Some("prev-1"));
         assert_eq!(meta.title, "重构 admin 布局");
-        assert_eq!(meta.resume_command, "codex resume 019cf4cc-34ed");
+        assert_eq!(meta.resume_command, "codex resume '019cf4cc-34ed'");
         assert_eq!(meta.message_count, 2);
         assert!(matches!(msgs[0].role, Role::User));
         assert!(matches!(msgs[1].role, Role::Assistant));
