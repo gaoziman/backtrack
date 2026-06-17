@@ -16,6 +16,11 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: CI 使用官方 crates.io 源（移除仅本地用的国内镜像配置）
+        # .cargo/config.toml 把源替换为 rsproxy.cn，仅为本地国内网络加速；
+        # GitHub runner 在境外访问该镜像不稳定（curl failed），故 CI 删除它走官方源。
+        run: rm -f .cargo/config.toml
+
       - name: 安装 pnpm
         uses: pnpm/action-setup@v4
         with:
