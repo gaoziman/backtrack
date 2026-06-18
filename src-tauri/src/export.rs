@@ -270,6 +270,7 @@ mod tests {
             message_count: 4,
             forked_from: None,
             resume_command: "claude --resume abc".into(),
+            has_children: false,
         }
     }
 

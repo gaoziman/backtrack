@@ -6,6 +6,10 @@ use crate::store::Store;
 use rayon::prelude::*;
 use std::path::Path;
 
+/// 标题提炼逻辑版本号。每次实质修改 `derive_title` 的提炼规则时 +1，
+/// 触发下次启动全量重建以让旧会话标题用新逻辑重算。
+pub const TITLE_LOGIC_VERSION: i64 = 1;
+
 #[derive(serde::Serialize, Clone, Default)]
 pub struct ScanSummary {
     pub total: usize,
@@ -55,10 +59,16 @@ pub fn build_index(store: &Store, claude_root: &Path, codex_root: &Path) -> Scan
     let items = scan_files(claude_root, codex_root);
     let existing = store.indexed_mtimes().unwrap_or_default();
 
-    // 仅并行解析新增或 mtime 变化的文件（增量核心）。
+    // 标题逻辑升级检测：库内版本与当前代码版本不一致 → 本次忽略 mtime，全量重解析，
+    // 让所有旧会话用新 derive_title 重算标题（用户自定义标题不受影响，读时 COALESCE 覆盖）。
+    let force_full = store.title_logic_version().unwrap_or(0) != TITLE_LOGIC_VERSION;
+
+    // 增量核心：仅解析新增或 mtime 变化的文件；force_full 时全部重解析。
     let parsed: Vec<(SessionMeta, Vec<Message>, i64)> = items
         .par_iter()
-        .filter(|it| existing.get(it.path.to_string_lossy().as_ref()) != Some(&it.mtime))
+        .filter(|it| {
+            force_full || existing.get(it.path.to_string_lossy().as_ref()) != Some(&it.mtime)
+        })
         .filter_map(|it| parse_item(it).map(|(meta, msgs)| (meta, msgs, it.mtime)))
         .collect();
 
@@ -79,6 +89,11 @@ pub fn build_index(store: &Store, claude_root: &Path, codex_root: &Path) -> Scan
         .collect();
     if !removed.is_empty() {
         let _ = store.delete_paths(&removed);
+    }
+
+    // 全量重建后写入当前标题逻辑版本号，避免下次重复重建。
+    if force_full {
+        let _ = store.set_title_logic_version(TITLE_LOGIC_VERSION);
     }
 
     // 统计：当前磁盘上全部会话（present），按工具分。
@@ -187,6 +202,43 @@ mod tests {
         assert_eq!(store.search("全新会话丙", None, None).unwrap().len(), 1);
     }
 
+    /// 标题逻辑版本号驱动全量重建：版本不匹配时，即使 mtime 未变也重解析。
+    #[test]
+    fn title_version_mismatch_forces_full_rebuild() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let claude = tempfile::tempdir().unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        let dir = claude.path().join("-Users-leo-ai");
+        let file = dir.join("s1.jsonl");
+        let store = Store::open_in_memory().unwrap();
+
+        // 首建：写入会话甲，mtime 固定。
+        write(&dir, "s1.jsonl", &claude_jsonl("标题甲内容"));
+        let f = std::fs::File::options().write(true).open(&file).unwrap();
+        f.set_modified(UNIX_EPOCH + Duration::from_secs(1000)).unwrap();
+        drop(f);
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(store.title_logic_version().unwrap(), TITLE_LOGIC_VERSION, "首建应写入版本号");
+
+        // 改内容、mtime 不变：版本匹配 → 增量跳过（标题不变）。
+        write(&dir, "s1.jsonl", &claude_jsonl("标题乙内容"));
+        let f = std::fs::File::options().write(true).open(&file).unwrap();
+        f.set_modified(UNIX_EPOCH + Duration::from_secs(1000)).unwrap();
+        drop(f);
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(store.search("标题乙内容", None, None).unwrap().len(), 0, "版本匹配+mtime未变应跳过");
+
+        // 模拟"derive_title 升级"：把库内版本号改旧 → 下次 build 强制全量重建。
+        store.set_title_logic_version(TITLE_LOGIC_VERSION - 1).unwrap();
+        build_index(&store, claude.path(), codex.path());
+        assert_eq!(
+            store.search("标题乙内容", None, None).unwrap().len(),
+            1,
+            "版本不匹配应忽略 mtime 全量重解析，标题乙生效"
+        );
+        assert_eq!(store.title_logic_version().unwrap(), TITLE_LOGIC_VERSION, "重建后版本号回正");
+    }
+
     /// 真实数据增量计时（默认忽略）：
     /// `cargo test real_data_incremental_timing -- --ignored --nocapture`
     /// 验证"首建全量慢、复建增量近乎瞬时"。
@@ -238,5 +290,43 @@ mod tests {
             println!("  [{}] {} — {}", h.meta.tool.as_str(), h.meta.title, h.meta.id);
         }
         assert!(sum.total > 0);
+    }
+
+    /// 真实数据标题质量诊断（默认忽略）：统计唯一标题数 / 无标题数 / Top 撞车。
+    /// cargo test real_title_uniqueness -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_title_uniqueness() {
+        use crate::scanner::{default_claude_root, default_codex_root};
+        use std::collections::HashSet;
+        let store = Store::open_in_memory().unwrap();
+        let c = default_claude_root().unwrap();
+        let x = default_codex_root().unwrap();
+        build_index(&store, &c, &x);
+        // 取所有会话标题统计唯一数
+        let mut titles = Vec::new();
+        for p in store.list_projects().unwrap() {
+            for s in store.list_sessions(&p.path).unwrap() {
+                titles.push(s.title);
+            }
+        }
+        let total = titles.len();
+        let uniq: HashSet<_> = titles.iter().collect();
+        let untitled = titles.iter().filter(|t| t.as_str()=="（无标题会话）").count();
+        println!("\n== 升级后标题统计 ==");
+        println!("总会话: {}", total);
+        println!("唯一标题数: {}", uniq.len());
+        println!("无标题会话数: {}", untitled);
+        // Top 撞车
+        use std::collections::HashMap;
+        let mut cnt: HashMap<&str,usize> = HashMap::new();
+        for t in &titles { *cnt.entry(t).or_insert(0)+=1; }
+        let mut v: Vec<_> = cnt.iter().collect();
+        v.sort_by(|a,b| b.1.cmp(a.1));
+        println!("Top 5 撞车标题:");
+        for (t,c) in v.iter().take(5) {
+            let short: String = t.chars().take(30).collect();
+            println!("  {:3}次  {}", c, short);
+        }
     }
 }

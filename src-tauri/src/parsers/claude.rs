@@ -1,6 +1,9 @@
 //! Claude Code `~/.claude/projects/<cwd>/<uuid>.jsonl` 解析器。
 use crate::models::{Message, Role, SessionMeta, Tool};
-use crate::parsers::{content_to_text, derive_title, format_tool_input, is_greeting, is_system_noise};
+use crate::parsers::{
+    content_to_text, format_tool_input, is_command_invocation, is_greeting, is_system_noise,
+    title_with_ai_fallback,
+};
 use serde_json::Value;
 use std::path::Path;
 
@@ -26,7 +29,8 @@ fn emit_parts(
             if fu.is_none() {
                 *fu = Some(s.to_string());
             }
-            if fs.is_none() && !is_greeting(s) {
+            // 实质句：非寒暄、非命令调用句（$analysis / 请你使用[$xxx](...) / /cmd）。
+            if fs.is_none() && !is_greeting(s) && !is_command_invocation(s) {
                 *fs = Some(s.to_string());
             }
         }
@@ -131,7 +135,11 @@ pub fn parse_claude(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         return None;
     }
 
-    let title = derive_title(first_substantive.as_deref().or(first_user_text.as_deref()));
+    // 标题：优先 user 实质句 → user 首句 → AI 兜底（首条 assistant 文本，AI 常复述任务）。
+    let title = title_with_ai_fallback(
+        first_substantive.as_deref().or(first_user_text.as_deref()),
+        &messages,
+    );
     let meta = SessionMeta {
         resume_command: Tool::Claude.resume_command(&id),
         id,
@@ -143,6 +151,7 @@ pub fn parse_claude(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         updated_at: last_ts,
         message_count: messages.len(),
         forked_from: None,
+        has_children: false,
     };
     Some((meta, messages))
 }

@@ -1,6 +1,9 @@
 //! Codex `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` 解析器。
 use crate::models::{Message, Role, SessionMeta, Tool};
-use crate::parsers::{content_to_text, derive_title, format_tool_input, is_greeting, is_system_noise};
+use crate::parsers::{
+    content_to_text, format_tool_input, is_command_invocation, is_greeting, is_system_noise,
+    title_with_ai_fallback,
+};
 use serde_json::Value;
 use std::path::Path;
 
@@ -87,7 +90,11 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
                     if first_user_text.is_none() {
                         first_user_text = Some(text.clone());
                     }
-                    if first_substantive.is_none() && !is_greeting(&text) {
+                    // 实质句：非寒暄、非命令调用句。
+                    if first_substantive.is_none()
+                        && !is_greeting(&text)
+                        && !is_command_invocation(&text)
+                    {
                         first_substantive = Some(text.clone());
                     }
                 }
@@ -140,7 +147,10 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         return None;
     }
 
-    let title = derive_title(first_substantive.as_deref().or(first_user_text.as_deref()));
+    let title = title_with_ai_fallback(
+        first_substantive.as_deref().or(first_user_text.as_deref()),
+        &messages,
+    );
     let meta = SessionMeta {
         resume_command: Tool::Codex.resume_command(&id),
         id,
@@ -152,6 +162,7 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         updated_at: last_ts,
         message_count: messages.len(),
         forked_from,
+        has_children: false,
     };
     Some((meta, messages))
 }
