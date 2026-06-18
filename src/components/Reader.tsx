@@ -3,10 +3,10 @@ import { useStore } from "../store";
 import { Tag } from "./Tag";
 import { MessageView } from "./MessageView";
 import { FindBar } from "./FindBar";
-import { IconCopy, IconDownload, IconFolder, IconTerminal } from "./icons";
+import { IconCopy, IconDownload, IconFolder, IconTerminal, IconFork, IconSparkle } from "./icons";
 
 export function Reader() {
-  const { activeSession, transcript, loadingTranscript, copyCommand, openTerminal, openExport } = useStore();
+  const { activeSession, transcript, loadingTranscript, copyCommand, openTerminal, openExport, openFork, aiConfig, regenAiTitle } = useStore();
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [findOpen, setFindOpen] = useState(false);
 
@@ -59,7 +59,6 @@ export function Reader() {
           <span>{s.message_count} 条消息</span>
           <span className="sep">·</span>
           <span>{timeStr}</span>
-          {s.forked_from && (<><span className="sep">·</span><span>fork 自 {s.forked_from.slice(0, 8)}</span></>)}
         </div>
         <div className="reader-actions">
           <div className="cmd-pill">
@@ -72,6 +71,16 @@ export function Reader() {
           <button className="btn" onClick={() => openExport(s)}>
             <IconDownload size={13} /> 导出
           </button>
+          {(s.forked_from || s.has_children) && (
+            <button className="btn" onClick={() => openFork(s)}>
+              <IconFork size={13} /> 分支谱系
+            </button>
+          )}
+          {aiConfig?.enabled && aiConfig.has_key && (
+            <button className="btn" title="用 AI 重新概括标题" onClick={() => regenAiTitle(s)}>
+              <IconSparkle size={13} /> 概括标题
+            </button>
+          )}
           <button className="btn primary" onClick={() => openTerminal(s)}>
             <IconTerminal size={13} /> 终端恢复
           </button>

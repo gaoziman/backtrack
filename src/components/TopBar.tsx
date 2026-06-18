@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { useStore } from "../store";
-import { IconLogo, IconMoon, IconSearch } from "./icons";
+import { IconLogo, IconMoon, IconSearch, IconSettings } from "./icons";
 
 const SINCE_OPTS = [["all", "全部"], ["7d", "近7天"], ["30d", "近30天"]] as const;
 const ROLE_OPTS = [["all", "全部"], ["user", "我"], ["ai", "AI"]] as const;
@@ -9,7 +9,7 @@ export function TopBar() {
   const {
     query, setQuery, toolFilter, toggleTool, toggleTheme,
     searchRole, searchSince, setSearchRole, setSearchSince,
-    searchCwd, setSearchCwd, projects,
+    searchCwd, setSearchCwd, projects, openSettings,
   } = useStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -89,6 +89,9 @@ export function TopBar() {
             </button>
           ))}
         </div>
+        <button className="iconbtn" title="AI 标题设置" onClick={openSettings}>
+          <IconSettings size={15} />
+        </button>
         <button className="iconbtn" title="切换明暗" onClick={() => toggleTheme()}>
           <IconMoon size={15} />
         </button>

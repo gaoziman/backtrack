@@ -2,7 +2,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool, ExportFormat,
+  Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool, ExportFormat, ForkNode,
+  AiConfigDto,
 } from "./types";
 
 export const api = {
@@ -52,6 +53,16 @@ export const api = {
   // 重命名会话标题（空字符串=恢复默认）；返回生效后的标题。
   renameSession: (filePath: string, title: string) =>
     invoke<string>("rename_session", { filePath, title }),
+  // 取会话所属 fork 谱系树（链顶为根）。
+  forkTree: (filePath: string) => invoke<ForkNode>("fork_tree", { filePath }),
+  // ---- AI 标题概括（可选功能，默认关闭）----
+  getAiConfig: () => invoke<AiConfigDto>("get_ai_config"),
+  setAiConfig: (enabled: boolean, baseUrl: string, apiKey: string, model: string) =>
+    invoke<void>("set_ai_config", { enabled, baseUrl, apiKey, model }),
+  testAiConnection: (baseUrl: string, apiKey: string, model: string) =>
+    invoke<void>("test_ai_connection", { baseUrl, apiKey, model }),
+  generateAiTitle: (filePath: string, tool: Tool, force: boolean) =>
+    invoke<string | null>("generate_ai_title", { filePath, tool, force }),
   // 订阅后端「索引已更新」事件（文件监听自动刷新）。返回取消订阅函数。
   onIndexUpdated: (cb: (s: ScanSummary) => void): Promise<UnlistenFn> =>
     listen<ScanSummary>("index-updated", (e) => cb(e.payload)),

@@ -1,5 +1,7 @@
+mod ai;
 mod commands;
 mod export;
+mod fork;
 mod indexer;
 mod models;
 mod parsers;
@@ -41,6 +43,11 @@ pub fn run() {
             commands::set_starred_all,
             commands::rename_session,
             commands::reveal_in_finder,
+            commands::fork_tree,
+            commands::get_ai_config,
+            commands::set_ai_config,
+            commands::test_ai_connection,
+            commands::generate_ai_title,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

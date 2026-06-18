@@ -2,7 +2,8 @@
 import { create } from "zustand";
 import { api } from "./api";
 import type {
-  Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool, ExportFormat,
+  Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool, ExportFormat, ForkNode,
+  AiConfigDto,
 } from "./types";
 
 type Theme = "dark" | "light";
@@ -49,6 +50,11 @@ interface AppState {
   confirmDelete: Project | null;
   renameTarget: SessionMeta | null;
   exportTarget: SessionMeta | null;
+  forkTarget: SessionMeta | null; // 当前打开谱系面板的会话；null=关闭
+  forkTree: ForkNode | null; // 已加载的 fork 树
+  forkLoading: boolean;
+  aiConfig: AiConfigDto | null; // AI 标题配置（null=未加载）
+  settingsOpen: boolean;
 
   // actions
   init: () => Promise<void>;
@@ -70,6 +76,13 @@ interface AppState {
   openExport: (s: SessionMeta) => void;
   closeExport: () => void;
   doExport: (format: ExportFormat, includeTools: boolean) => Promise<void>;
+  openFork: (s: SessionMeta) => Promise<void>;
+  closeFork: () => void;
+  openSettings: () => void;
+  closeSettings: () => void;
+  loadAiConfig: () => Promise<void>;
+  saveAiConfig: (cfg: { enabled: boolean; baseUrl: string; apiKey: string; model: string }) => Promise<void>;
+  regenAiTitle: (s: SessionMeta) => Promise<void>;
   setQuery: (q: string) => void;
   setSearchRole: (r: SearchRole) => void;
   setSearchSince: (t: SearchSince) => void;
@@ -114,10 +127,16 @@ export const useStore = create<AppState>((set, get) => ({
   confirmDelete: null,
   renameTarget: null,
   exportTarget: null,
+  forkTarget: null,
+  forkTree: null,
+  forkLoading: false,
+  aiConfig: null,
+  settingsOpen: false,
 
   init: async () => {
     set({ scanning: true });
     try {
+      get().loadAiConfig(); // 异步加载 AI 配置（不阻塞）
       await api.scan();
       await get().refreshLists();
       set({ scanning: false });
@@ -223,6 +242,18 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       set({ loadingTranscript: false });
       get().showToast(`加载对话失败: ${e}`);
+    }
+    // AI 标题：开启且该会话标题撞车/无意义时，后台静默生成（不阻塞、失败不打断）。
+    const cfg = get().aiConfig;
+    if (cfg?.enabled && cfg.has_key && shouldGenAiTitle(s, get)) {
+      api
+        .generateAiTitle(s.file_path, s.tool, false)
+        .then((title) => {
+          if (title) applyAiTitle(set, get, s.file_path, title);
+        })
+        .catch(() => {
+          /* 网络/key 失败 → 静默保持启发式标题 */
+        });
     }
   },
 
@@ -464,6 +495,66 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  // 打开 fork 谱系面板：先开面板（占位 loading），再异步取树。
+  openFork: async (s) => {
+    set({ forkTarget: s, forkTree: null, forkLoading: true });
+    try {
+      const tree = await api.forkTree(s.file_path);
+      // 竞态保护：仅当仍在查看同一会话时应用结果。
+      if (get().forkTarget?.file_path === s.file_path) {
+        set({ forkTree: tree, forkLoading: false });
+      }
+    } catch (e) {
+      set({ forkTarget: null, forkTree: null, forkLoading: false });
+      get().showToast(`加载谱系失败: ${e}`);
+    }
+  },
+  closeFork: () => set({ forkTarget: null, forkTree: null, forkLoading: false }),
+
+  openSettings: () => set({ settingsOpen: true }),
+  closeSettings: () => set({ settingsOpen: false }),
+
+  loadAiConfig: async () => {
+    try {
+      const aiConfig = await api.getAiConfig();
+      set({ aiConfig });
+    } catch {
+      /* 读配置失败不影响主流程 */
+    }
+  },
+
+  saveAiConfig: async (cfg) => {
+    try {
+      await api.setAiConfig(cfg.enabled, cfg.baseUrl, cfg.apiKey, cfg.model);
+      await get().loadAiConfig();
+      set({ settingsOpen: false });
+      get().showToast(cfg.enabled ? "AI 标题已开启" : "AI 标题已关闭");
+    } catch (e) {
+      get().showToast(`保存设置失败: ${e}`);
+    }
+  },
+
+  // 手动重新概括当前会话标题（强制覆盖缓存）。
+  regenAiTitle: async (s) => {
+    const cfg = get().aiConfig;
+    if (!cfg?.enabled || !cfg.has_key) {
+      get().showToast("请先在设置中开启 AI 标题");
+      return;
+    }
+    get().showToast("正在概括标题…");
+    try {
+      const title = await api.generateAiTitle(s.file_path, s.tool, true);
+      if (title) {
+        applyAiTitle(set, get, s.file_path, title);
+        get().showToast(`已概括：${title}`);
+      } else {
+        get().showToast("未生成标题");
+      }
+    } catch (e) {
+      get().showToast(`概括失败: ${e}`);
+    }
+  },
+
   showToast: (msg) => {
     set({ toast: msg });
     window.setTimeout(() => {
@@ -476,4 +567,45 @@ export const useStore = create<AppState>((set, get) => ({
 function leaf(path: string): string {
   const parts = path.split("/").filter(Boolean);
   return parts[parts.length - 1] || path;
+}
+
+// 判断该会话是否值得调 AI 生成标题：标题与其它会话撞车，或为寒暄/无意义短标题。
+function shouldGenAiTitle(s: SessionMeta, get: () => AppState): boolean {
+  const title = (s.title || "").trim();
+  if (!title || title === "（无标题会话）") return true;
+  // 寒暄/极短标题
+  if (title.length <= 4) return true;
+  // 撞车检测：在已加载的会话缓存里，同名标题 ≥ 2 个。
+  const sbp = get().sessionsByProject;
+  let count = 0;
+  for (const k of Object.keys(sbp)) {
+    for (const x of sbp[k]) {
+      if (x.title === title) count++;
+      if (count >= 2) return true;
+    }
+  }
+  return false;
+}
+
+// 把 AI 标题就地写入各处会话副本（侧栏缓存 / 当前会话 / 搜索结果），并标记缓存已有。
+function applyAiTitle(
+  set: (partial: Partial<AppState> | ((s: AppState) => Partial<AppState>)) => void,
+  get: () => AppState,
+  filePath: string,
+  title: string,
+): void {
+  const sbp = { ...get().sessionsByProject };
+  for (const k of Object.keys(sbp)) {
+    sbp[k] = sbp[k].map((s) => (s.file_path === filePath ? { ...s, title } : s));
+  }
+  const patch: Partial<AppState> = { sessionsByProject: sbp };
+  const active = get().activeSession;
+  if (active && active.file_path === filePath) {
+    patch.activeSession = { ...active, title };
+  }
+  const sr = get().searchResults;
+  if (sr) {
+    patch.searchResults = sr.map((s) => (s.file_path === filePath ? { ...s, title } : s));
+  }
+  set(patch);
 }

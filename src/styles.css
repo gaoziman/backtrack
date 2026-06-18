@@ -344,3 +344,39 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: va
 /* 会话内查找高亮（CSS Custom Highlight API） */
 ::highlight(bt-find) { background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--text-hi); }
 ::highlight(bt-find-current) { background: var(--accent); color: #fff; }
+
+/* Fork 谱系树（ForkTreeDialog） */
+.fork-tree { max-height: min(60vh, 480px); overflow: auto; padding: 2px 0; }
+.fork-branch { position: relative; }
+.fork-node-card {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 34px; padding: 5px 9px; margin: 2px 0;
+  border: 1px solid transparent; border-radius: 8px;
+  cursor: pointer; transition: background .15s, border-color .15s;
+}
+.fork-node-card:hover { background: var(--hover); border-color: var(--border); }
+.fork-node-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fork-node-card.current { background: var(--accent-dim); border-color: var(--accent); }
+.fork-node-card.missing { cursor: default; }
+.fork-node-card.missing:hover { background: transparent; border-color: transparent; }
+
+.fork-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; border: 1.5px solid var(--text-lo); }
+.fork-dot.on { background: var(--accent); border-color: var(--accent); }
+
+.fork-node-title { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-hi); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fork-cur-badge { flex-shrink: 0; font-size: 10px; font-weight: 600; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; line-height: 15px; }
+.fork-node-meta { flex-shrink: 0; display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--text-lo); }
+.fork-missing { flex: 1; font-size: 12px; font-style: italic; color: var(--text-lo); }
+
+/* AI 设置面板（SettingsDialog） */
+.ai-fields { display: flex; flex-direction: column; gap: 12px; transition: opacity .15s; }
+.ai-fields.disabled { opacity: .45; pointer-events: none; }
+.ai-field { display: flex; flex-direction: column; gap: 5px; }
+.ai-label { font-size: 12px; font-weight: 550; color: var(--text-mid); }
+.ai-field input { height: 32px; padding: 0 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-hi); font-family: var(--sans); font-size: 12.5px; outline: none; transition: border-color .15s, box-shadow .15s; }
+.ai-field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.ai-key-row { display: flex; gap: 6px; align-items: center; }
+.ai-key-row input { flex: 1; }
+.ai-hint { font-size: 10.5px; color: var(--faint); }
+.ai-test-row { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.ai-test-result { font-size: 12px; }

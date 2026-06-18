@@ -1,5 +1,7 @@
 //! Tauri 命令层：前端通过 invoke 调用。
+use crate::ai::{self, AiConfig};
 use crate::export::{self, ExportFormat};
+use crate::fork::{build_fork_tree, ForkNode};
 use crate::indexer::{build_index, ScanSummary};
 use crate::models::{Message, Project, SearchHit, SessionMeta, Tool};
 use crate::parsers::{claude, codex};
@@ -257,4 +259,118 @@ pub fn reveal_in_finder(path: String, reveal: bool) -> Result<(), String> {
     cmd.arg(&path);
     cmd.spawn().map_err(|e| format!("打开 Finder 失败: {}", e))?;
     Ok(())
+}
+
+/// 返回当前会话所属的 fork 谱系树（以链顶为根）。
+/// 取目标会话 cwd 下全部会话，在内存构树（含缺父占位、防环）。
+/// 孤立会话返回仅含自身的单节点树。只读，绝不修改原始数据。
+#[tauri::command]
+pub fn fork_tree(state: State<'_, AppState>, file_path: String) -> Result<ForkNode, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let current = store
+        .session_by_path(&file_path)
+        .map_err(|e| e.to_string())?
+        .ok_or("会话不存在")?;
+    let sessions = store.list_sessions(&current.cwd).map_err(|e| e.to_string())?;
+    Ok(build_fork_tree(&sessions, &file_path))
+}
+
+/// 前端读 AI 配置：key 脱敏（仅返回是否已配置 + 掩码），不回传明文。
+#[derive(serde::Serialize)]
+pub struct AiConfigDto {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub has_key: bool,
+}
+
+/// 读取 AI 配置（key 脱敏，不回传明文）。
+#[tauri::command]
+pub fn get_ai_config(state: State<'_, AppState>) -> Result<AiConfigDto, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let c = store.ai_config().map_err(|e| e.to_string())?;
+    Ok(AiConfigDto {
+        enabled: c.enabled,
+        base_url: c.base_url,
+        model: c.model,
+        has_key: !c.api_key.trim().is_empty(),
+    })
+}
+
+/// 写入 AI 配置。api_key 为空字符串时**保留原有 key**（前端不重填即不覆盖）。
+#[tauri::command]
+pub fn set_ai_config(
+    state: State<'_, AppState>,
+    enabled: bool,
+    base_url: String,
+    api_key: String,
+    model: String,
+) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let existing = store.ai_config().map_err(|e| e.to_string())?;
+    let key = if api_key.trim().is_empty() { existing.api_key } else { api_key };
+    let cfg = AiConfig { enabled, base_url, api_key: key, model };
+    store.set_ai_config(&cfg).map_err(|e| e.to_string())
+}
+
+/// 测试 AI 连接（用当前已存配置；若前端传了新 key 则用新 key 测）。
+#[tauri::command]
+pub async fn test_ai_connection(
+    state: State<'_, AppState>,
+    base_url: String,
+    api_key: String,
+    model: String,
+) -> Result<(), String> {
+    // 取配置：先锁读出已存 key（前端未重填时用），随即释放锁再 await。
+    let cfg = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let existing = store.ai_config().map_err(|e| e.to_string())?;
+        let key = if api_key.trim().is_empty() { existing.api_key } else { api_key };
+        AiConfig { enabled: true, base_url, api_key: key, model }
+    };
+    ai::test_connection(&cfg).await
+}
+
+/// 按需生成 AI 标题。
+/// - 未启用 / 无 key → Ok(None)；
+/// - 已有缓存且 !force → 返回缓存；
+/// - 否则解析会话内容 → 调 AI → 缓存 → 返回新标题。
+/// 任何网络/解析失败 → Err（前端静默降级，不更新标题）。
+#[tauri::command]
+pub async fn generate_ai_title(
+    state: State<'_, AppState>,
+    file_path: String,
+    tool: String,
+    force: bool,
+) -> Result<Option<String>, String> {
+    // 阶段 1：锁库读配置 + 缓存（不跨 await 持锁）。
+    let cfg = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        if !force {
+            if let Some(cached) = store.ai_title(&file_path).map_err(|e| e.to_string())? {
+                return Ok(Some(cached));
+            }
+        }
+        store.ai_config().map_err(|e| e.to_string())?
+    };
+    if !cfg.is_usable() {
+        return Ok(None); // 未启用/无 key：静默不生成。
+    }
+
+    // 阶段 2：解析会话内容（纯文件读，无锁）。
+    let (_, messages) = parse_transcript(&file_path, &tool)?;
+    let excerpt = ai::excerpt_for_title(&messages, 3000);
+    if excerpt.trim().is_empty() {
+        return Ok(None);
+    }
+
+    // 阶段 3：await HTTP（无锁）。
+    let title = ai::request_title(&cfg, &excerpt).await?;
+
+    // 阶段 4：回锁写缓存。
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store.set_ai_title(&file_path, &title).map_err(|e| e.to_string())?;
+    }
+    Ok(Some(title))
 }

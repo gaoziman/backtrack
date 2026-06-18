@@ -62,7 +62,9 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
             CREATE TABLE IF NOT EXISTS hidden (cwd TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS starred (cwd TEXT PRIMARY KEY);
-            CREATE TABLE IF NOT EXISTS custom_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);",
+            CREATE TABLE IF NOT EXISTS custom_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ai_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);",
         )?;
         // FTS5 全文索引（trigram 子串分词，CJK 友好）。
         // 若运行环境的 SQLite 未编译 FTS5/trigram，则建表失败 → 记录并全程走 LIKE 兜底。
@@ -191,6 +193,11 @@ impl Store {
              (SELECT file_path FROM sessions WHERE cwd = ?1)",
             params![cwd],
         )?;
+        self.conn.execute(
+            "DELETE FROM ai_titles WHERE file_path IN
+             (SELECT file_path FROM sessions WHERE cwd = ?1)",
+            params![cwd],
+        )?;
         let n = self
             .conn
             .execute("DELETE FROM sessions WHERE cwd = ?1", params![cwd])?;
@@ -211,6 +218,8 @@ impl Store {
             }
             self.conn
                 .execute("DELETE FROM custom_titles WHERE file_path = ?1", params![p])?;
+            self.conn
+                .execute("DELETE FROM ai_titles WHERE file_path = ?1", params![p])?;
             n += self
                 .conn
                 .execute("DELETE FROM sessions WHERE file_path = ?1", params![p])?;
@@ -300,20 +309,48 @@ impl Store {
             updated_at: r.get("updated_at")?,
             message_count: r.get::<_, i64>("msg_count")? as usize,
             forked_from: r.get("forked_from")?,
+            // 默认 false；list_sessions 用专用查询覆盖为真实值。
+            has_children: false,
         })
     }
 
     /// 中栏：某目录下的会话，按最近活动降序。
+    /// 附带计算 `has_children`（是否有其它会话 fork 自本会话），供前端判定谱系入口。
     pub fn list_sessions(&self, cwd: &str) -> rusqlite::Result<Vec<SessionMeta>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.tool, s.cwd, s.file_path,
-                    COALESCE(ct.title, s.title) AS title,
-                    s.started_at, s.updated_at, s.msg_count, s.forked_from
+                    COALESCE(ct.title, at.title, s.title) AS title,
+                    s.started_at, s.updated_at, s.msg_count, s.forked_from,
+                    EXISTS(SELECT 1 FROM sessions f WHERE f.forked_from = s.id) AS has_kids
              FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             LEFT JOIN ai_titles at ON at.file_path = s.file_path
              WHERE s.cwd = ?1 ORDER BY s.updated_at DESC",
         )?;
-        let rows = stmt.query_map(params![cwd], Self::row_to_meta)?;
+        let rows = stmt.query_map(params![cwd], Self::row_to_meta_with_children)?;
         rows.collect()
+    }
+
+    /// 按文件路径取单条会话元数据（fork_tree 命令定位当前会话用）。
+    pub fn session_by_path(&self, file_path: &str) -> rusqlite::Result<Option<SessionMeta>> {
+        self.conn
+            .query_row(
+                "SELECT s.id, s.tool, s.cwd, s.file_path,
+                        COALESCE(ct.title, at.title, s.title) AS title,
+                        s.started_at, s.updated_at, s.msg_count, s.forked_from
+                 FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             LEFT JOIN ai_titles at ON at.file_path = s.file_path
+                 WHERE s.file_path = ?1",
+                params![file_path],
+                Self::row_to_meta,
+            )
+            .optional()
+    }
+
+    /// 同 row_to_meta，但额外读取 `has_kids` 列填充 has_children。
+    fn row_to_meta_with_children(r: &rusqlite::Row) -> rusqlite::Result<SessionMeta> {
+        let mut m = Self::row_to_meta(r)?;
+        m.has_children = r.get::<_, bool>("has_kids")?;
+        Ok(m)
     }
 
     fn row_to_meta_body(r: &rusqlite::Row) -> rusqlite::Result<(SessionMeta, String)> {
@@ -382,11 +419,12 @@ impl Store {
         // 注意：FTS5 的 MATCH 左操作数须为表名（非别名），rank 同理。
         let sql = format!(
             "SELECT s.id, s.tool, s.cwd, s.file_path,
-                    COALESCE(ct.title, s.title) AS title,
+                    COALESCE(ct.title, at.title, s.title) AS title,
                     s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
              FROM sessions_fts
              JOIN sessions s ON s.file_path = sessions_fts.file_path
              LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             LEFT JOIN ai_titles at ON at.file_path = s.file_path
              WHERE sessions_fts MATCH ? AND (? IS NULL OR s.updated_at >= ?){filter_sql}
              ORDER BY sessions_fts.rank LIMIT 200"
         );
@@ -418,9 +456,10 @@ impl Store {
         let (filter_sql, filter_params) = build_filters(tools, cwd);
         let sql = format!(
             "SELECT s.id, s.tool, s.cwd, s.file_path,
-                    COALESCE(ct.title, s.title) AS title,
+                    COALESCE(ct.title, at.title, s.title) AS title,
                     s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
              FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             LEFT JOIN ai_titles at ON at.file_path = s.file_path
              WHERE {where_role}
              AND (? IS NULL OR s.updated_at >= ?){filter_sql}
              ORDER BY s.updated_at DESC LIMIT 200"
@@ -445,6 +484,83 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
         Ok(n as usize)
+    }
+
+    /// 读标题逻辑版本号（meta 表，缺省 0）。用于判断 derive_title 升级后是否需全量重建。
+    pub fn title_logic_version(&self) -> rusqlite::Result<i64> {
+        let v: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'title_logic_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
+    }
+
+    /// 写标题逻辑版本号。
+    pub fn set_title_logic_version(&self, v: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('title_logic_version', ?1)",
+            params![v.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// 读 meta 表单个键（缺省 None）。
+    fn meta_get(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()
+    }
+
+    /// 写 meta 表单个键。
+    fn meta_set(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// 读取 AI 配置（默认关闭、空 key）。
+    pub fn ai_config(&self) -> rusqlite::Result<crate::ai::AiConfig> {
+        Ok(crate::ai::AiConfig {
+            enabled: self.meta_get("ai_enabled")?.as_deref() == Some("1"),
+            base_url: self.meta_get("ai_base_url")?.unwrap_or_default(),
+            api_key: self.meta_get("ai_api_key")?.unwrap_or_default(),
+            model: self.meta_get("ai_model")?.unwrap_or_else(|| "claude-opus-4-8".into()),
+        })
+    }
+
+    /// 写入 AI 配置。
+    pub fn set_ai_config(&self, cfg: &crate::ai::AiConfig) -> rusqlite::Result<()> {
+        self.meta_set("ai_enabled", if cfg.enabled { "1" } else { "0" })?;
+        self.meta_set("ai_base_url", cfg.base_url.trim())?;
+        self.meta_set("ai_api_key", cfg.api_key.trim())?;
+        self.meta_set("ai_model", cfg.model.trim())?;
+        Ok(())
+    }
+
+    /// 读 AI 标题缓存。
+    pub fn ai_title(&self, file_path: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT title FROM ai_titles WHERE file_path = ?1",
+                params![file_path],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// 写 AI 标题缓存。
+    pub fn set_ai_title(&self, file_path: &str, title: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ai_titles(file_path, title) VALUES (?1, ?2)",
+            params![file_path, title],
+        )?;
+        Ok(())
     }
 
     /// 已索引的 `{文件路径 → mtime}` 映射，供增量同步比对。
@@ -536,6 +652,7 @@ mod tests {
             started_at: "2026-01-01".into(), updated_at: updated.into(),
             message_count: 3, forked_from: None,
             resume_command: tool.resume_command(id),
+            has_children: false,
         }
     }
 
@@ -875,5 +992,101 @@ mod tests {
         up(&s, &meta("a", "/p/x", "新派生", "2026-06-17"), "正文");
         let list = s.list_sessions("/p/x").unwrap();
         assert_eq!(list[0].title, "新派生", "删除目录后自定义标题不应残留");
+    }
+
+    // ---- fork 谱系（has_children / session_by_path）----
+
+    /// 带 forked_from 的会话构造（fork 关系测试用）。
+    fn meta_fork(id: &str, cwd: &str, parent: Option<&str>, updated: &str) -> SessionMeta {
+        SessionMeta {
+            id: id.into(), tool: Tool::Codex, cwd: cwd.into(),
+            file_path: format!("/f/{}", id), title: format!("会话{}", id),
+            started_at: updated.into(), updated_at: updated.into(),
+            message_count: 1, forked_from: parent.map(|x| x.into()),
+            resume_command: Tool::Codex.resume_command(id), has_children: false,
+        }
+    }
+
+    /// list_sessions 计算 has_children：被 fork 的父=true，叶子=false。
+    #[test]
+    fn list_sessions_computes_has_children() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("parent", "/p/ai", None, "2026-06-16"), "x", "x", "", 0).unwrap();
+        s.upsert(&meta_fork("child", "/p/ai", Some("parent"), "2026-06-15"), "y", "y", "", 0).unwrap();
+
+        let list = s.list_sessions("/p/ai").unwrap();
+        let parent = list.iter().find(|m| m.id == "parent").unwrap();
+        let child = list.iter().find(|m| m.id == "child").unwrap();
+        assert!(parent.has_children, "被 fork 的父应 has_children=true");
+        assert!(!child.has_children, "叶子会话 has_children=false");
+    }
+
+    /// session_by_path 命中与未命中。
+    #[test]
+    fn session_by_path_finds_and_misses() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("a", "/p/ai", None, "2026-06-16"), "x", "x", "", 0).unwrap();
+        let got = s.session_by_path("/f/a").unwrap();
+        assert_eq!(got.unwrap().id, "a");
+        assert!(s.session_by_path("/f/none").unwrap().is_none());
+    }
+
+    /// AI 配置读写：默认关闭、有默认地址/模型；写后读回。
+    #[test]
+    fn ai_config_read_write() {
+        let s = Store::open_in_memory().unwrap();
+        let c = s.ai_config().unwrap();
+        assert!(!c.enabled, "默认关闭");
+        assert!(c.api_key.is_empty(), "默认无 key");
+        assert_eq!(c.model, "claude-opus-4-8");
+
+        let new = crate::ai::AiConfig {
+            enabled: true,
+            base_url: "https://x/v1/messages".into(),
+            api_key: "sk-secret".into(),
+            model: "claude-opus-4-8".into(),
+        };
+        s.set_ai_config(&new).unwrap();
+        let got = s.ai_config().unwrap();
+        assert!(got.enabled);
+        assert_eq!(got.api_key, "sk-secret");
+        assert_eq!(got.base_url, "https://x/v1/messages");
+    }
+
+    /// AI 标题缓存读写 + 三层优先级（用户 > AI > 启发式）。
+    #[test]
+    fn ai_title_cache_and_priority() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("a", "/p/ai", None, "2026-06-16"), "x", "x", "", 0).unwrap();
+        // 仅启发式
+        assert_eq!(s.list_sessions("/p/ai").unwrap()[0].title, "会话a");
+        // 加 AI 标题 → 覆盖启发式
+        s.set_ai_title("/f/a", "AI概括的标题").unwrap();
+        assert_eq!(s.ai_title("/f/a").unwrap().as_deref(), Some("AI概括的标题"));
+        assert_eq!(s.list_sessions("/p/ai").unwrap()[0].title, "AI概括的标题");
+        // 加用户自定义 → 覆盖 AI
+        s.set_custom_title("/f/a", "用户标题").unwrap();
+        assert_eq!(s.list_sessions("/p/ai").unwrap()[0].title, "用户标题", "用户 > AI");
+    }
+
+    /// 删除会话时一并清 ai_titles（不残留）。
+    #[test]
+    fn delete_cleans_ai_titles() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("a", "/p/ai", None, "2026-06-16"), "x", "x", "", 0).unwrap();
+        s.set_ai_title("/f/a", "AI标题").unwrap();
+        s.delete_paths(&["/f/a".to_string()]).unwrap();
+        assert!(s.ai_title("/f/a").unwrap().is_none(), "删除后 ai_title 应清除");
+    }
+
+    /// 标题逻辑版本号读写：缺省 0，写后可读回。
+    #[test]
+    fn title_logic_version_read_write() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.title_logic_version().unwrap(), 0, "缺省应为 0");
+        s.set_title_logic_version(3).unwrap();
+        assert_eq!(s.title_logic_version().unwrap(), 3);
+        s.set_title_logic_version(5).unwrap(); // 覆盖
+        assert_eq!(s.title_logic_version().unwrap(), 5);
     }
 }

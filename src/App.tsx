@@ -10,12 +10,16 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ManageDirs } from "./components/ManageDirs";
 import { RenameDialog } from "./components/RenameDialog";
 import { ExportDialog } from "./components/ExportDialog";
+import { ForkTreeDialog } from "./components/ForkTreeDialog";
+import { SettingsDialog } from "./components/SettingsDialog";
 
 export default function App() {
   const init = useStore((s) => s.init);
   const closeTerminal = useStore((s) => s.closeTerminal);
   const cancelDelete = useStore((s) => s.cancelDelete);
   const closeExport = useStore((s) => s.closeExport);
+  const closeFork = useStore((s) => s.closeFork);
+  const closeSettings = useStore((s) => s.closeSettings);
   const [sideW, setSideW] = useState(288);
   const dragging = useRef(false);
 
@@ -45,11 +49,13 @@ export default function App() {
         closeTerminal();
         cancelDelete();
         closeExport();
+        closeFork();
+        closeSettings();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [closeTerminal, cancelDelete, closeExport]);
+  }, [closeTerminal, cancelDelete, closeExport, closeFork, closeSettings]);
 
   // 左栏拖拽改宽（220–380）
   const startResize = (e: React.MouseEvent) => {
@@ -85,6 +91,8 @@ export default function App() {
       <ManageDirs />
       <RenameDialog />
       <ExportDialog />
+      <ForkTreeDialog />
+      <SettingsDialog />
       <Toast />
     </div>
   );

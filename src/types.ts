@@ -19,6 +19,16 @@ export interface SessionMeta {
   message_count: number;
   forked_from: string | null;
   resume_command: string;
+  /// 是否有其它会话 fork 自本会话（后端 list_sessions 计算）。供判定谱系入口。
+  has_children?: boolean;
+}
+
+/// Fork 谱系树节点：会话元数据全字段（占位节点除外）+ 子节点。
+/// missing=true 时为「父不在本地」占位节点，meta 字段缺失。
+export interface ForkNode extends Partial<SessionMeta> {
+  missing: boolean;
+  is_current: boolean;
+  children: ForkNode[];
 }
 
 export interface Message {
@@ -41,4 +51,12 @@ export interface ScanSummary {
   total: number;
   claude: number;
   codex: number;
+}
+
+/// AI 标题配置（从后端读取，key 脱敏为 has_key）。
+export interface AiConfigDto {
+  enabled: boolean;
+  base_url: string;
+  model: string;
+  has_key: boolean;
 }
