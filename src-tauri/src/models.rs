@@ -60,6 +60,11 @@ pub struct SessionMeta {
     pub forked_from: Option<String>,
     /// 前端直接展示/复制的 resume 命令。
     pub resume_command: String,
+    /// 派生字段（非入库）：是否有其它会话 fork 自本会话。
+    /// 由 list_sessions 查询时计算，供前端判定是否显示 fork 谱系入口。
+    /// 默认 false；序列化用 default 保证向后兼容、构造可省略。
+    #[serde(default)]
+    pub has_children: bool,
 }
 
 /// 搜索命中：会话元数据 + 命中正文片段（仅标题命中时片段为 None）。
@@ -148,7 +153,7 @@ mod tests {
             id: "id1".into(), tool: Tool::Codex, cwd: "/x/y".into(),
             file_path: "/f".into(), title: "t".into(), started_at: "a".into(),
             updated_at: "b".into(), message_count: 2, forked_from: None,
-            resume_command: "codex resume id1".into(),
+            resume_command: "codex resume id1".into(), has_children: false,
         };
         let v: serde_json::Value = serde_json::to_value(&m).unwrap();
         assert_eq!(v["tool"], "codex");
