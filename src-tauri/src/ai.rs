@@ -4,6 +4,7 @@
 //! 概括成一句精炼标题。纯函数（prompt 构造 / 响应解析 / 素材提取）可单测，
 //! 网络调用隔离在 async 函数中。失败由调用方负责降级，绝不 panic。
 use crate::models::{Message, Role};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// 生成标题的最大字符数（清洗时硬上限）。
@@ -148,6 +149,158 @@ pub async fn test_connection(cfg: &AiConfig) -> Result<(), String> {
     request_title(cfg, "用户：你好\n助手：你好").await.map(|_| ())
 }
 
+// ============================================================
+//  AI 会话摘要（可选功能，默认关闭）— 与 AI 标题同构。
+//  把会话前若干轮对话发给 LLM，概括成三段式结构化摘要。
+// ============================================================
+
+/// 摘要素材最大字符数（比标题更大，需要更多上下文）。
+pub const SUMMARY_EXCERPT_MAX: usize = 6000;
+/// 摘要响应 token 上限。
+const SUMMARY_MAX_TOKENS: u32 = 512;
+/// 摘要 gist 硬上限字符数。
+const SUMMARY_GIST_MAX: usize = 80;
+/// 关键结论最多条数。
+const SUMMARY_CONCLUSION_MAX: usize = 5;
+/// 涉及代码最多条数。
+const SUMMARY_FILE_MAX: usize = 8;
+
+const SUMMARY_SYSTEM_PROMPT: &str = "你是会话摘要助手。阅读这段开发对话后，只输出一个 JSON 对象，\
+格式为 {\"gist\":\"一句话总结(不超过60字)\",\"conclusions\":[\"关键结论\",...最多5条],\"files\":[\"涉及的文件路径\",...]}。\
+gist 概括对话核心；conclusions 列出关键决定/结论；files 列出对话中明确提到的代码文件路径(没有则空数组)。\
+只输出 JSON 本身，不要解释、不要前缀、不要 markdown 代码块围栏。";
+
+/// AI 摘要结构化结果（三段式）。
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+pub struct AiSummary {
+    pub gist: String,
+    pub conclusions: Vec<String>,
+    pub files: Vec<String>,
+}
+
+impl AiSummary {
+    /// 是否为空摘要（无任何可展示内容）。
+    pub fn is_empty(&self) -> bool {
+        self.gist.trim().is_empty() && self.conclusions.is_empty() && self.files.is_empty()
+    }
+}
+
+/// 从会话消息提取摘要素材（纯函数）。与 excerpt_for_title 同构，仅预算更大。
+pub fn excerpt_for_summary(messages: &[Message], max_chars: usize) -> String {
+    excerpt_for_title(messages, max_chars)
+}
+
+/// 构造摘要请求体（纯函数）。
+pub fn build_summary_request(model: &str, convo_excerpt: &str) -> Value {
+    json!({
+        "model": model,
+        "max_tokens": SUMMARY_MAX_TOKENS,
+        "system": SUMMARY_SYSTEM_PROMPT,
+        "messages": [{ "role": "user", "content": convo_excerpt }]
+    })
+}
+
+/// 把模型返回的文本解析为结构化摘要（纯函数）。
+/// 先尝试 JSON 解析；失败则把整段文本降级为 gist。空文本 → None。
+pub fn parse_summary_json(raw: &str) -> Option<AiSummary> {
+    let text = strip_code_fence(raw.trim());
+    if text.is_empty() {
+        return None;
+    }
+    // 优先尝试结构化 JSON。
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        let gist = v
+            .get("gist")
+            .and_then(|g| g.as_str())
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(SUMMARY_GIST_MAX)
+            .collect::<String>();
+        let conclusions = string_array(v.get("conclusions"), SUMMARY_CONCLUSION_MAX);
+        let files = string_array(v.get("files"), SUMMARY_FILE_MAX);
+        let s = AiSummary { gist, conclusions, files };
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    // 降级：整段文本作为 gist。
+    let gist: String = text.chars().take(SUMMARY_GIST_MAX).collect();
+    Some(AiSummary { gist, conclusions: vec![], files: vec![] })
+}
+
+/// 去除 ```json ... ``` 之类的 markdown 代码块围栏（纯函数）。
+fn strip_code_fence(s: &str) -> &str {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        // 跳过可选语言标识行。
+        let rest = rest.strip_prefix("json").unwrap_or(rest);
+        let rest = rest.trim_start_matches('\n');
+        if let Some(inner) = rest.strip_suffix("```") {
+            return inner.trim();
+        }
+        return rest.trim_end_matches('`').trim();
+    }
+    t
+}
+
+/// 从 JSON 值提取字符串数组，去空白/空项，限条数（纯函数）。
+fn string_array(v: Option<&Value>, max: usize) -> Vec<String> {
+    v.and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .take(max)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 解析 Anthropic 响应，提取并结构化摘要（纯函数）。失败返回 None。
+pub fn parse_summary_response(body: &Value) -> Option<AiSummary> {
+    let content = body.get("content")?.as_array()?;
+    let mut text = String::new();
+    for part in content {
+        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+            text.push_str(t);
+        }
+    }
+    parse_summary_json(&text)
+}
+
+/// 调用 LLM 生成摘要（async，触网）。失败返回 Err(脱敏信息)。
+pub async fn request_summary(cfg: &AiConfig, convo_excerpt: &str) -> Result<AiSummary, String> {
+    let client = http_client()?;
+    let req = build_summary_request(&cfg.model, convo_excerpt);
+    let resp = client
+        .post(cfg.base_url.trim())
+        .header("x-api-key", cfg.api_key.trim())
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", redact(&e.to_string(), &cfg.api_key)))?;
+
+    let status = resp.status();
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败: {}", redact(&e.to_string(), &cfg.api_key)))?;
+
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
+        return Err(format!("API {}: {}", status.as_u16(), redact(msg, &cfg.api_key)));
+    }
+    parse_summary_response(&body).ok_or_else(|| "AI 返回空摘要".to_string())
+}
+
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
@@ -256,5 +409,99 @@ mod tests {
         let r = redact("error with sk-secret123 in url", "sk-secret123");
         assert!(!r.contains("sk-secret123"));
         assert!(r.contains("***"));
+    }
+
+    // ---- AI 摘要测试 ----
+
+    #[test]
+    fn summary_excerpt_reuses_title_logic() {
+        let msgs = vec![
+            msg(Role::User, "重构导出模块", None),
+            msg(Role::Assistant, "rm -rf x", Some("Bash")), // 工具调用，跳过
+            msg(Role::Assistant, "改用策略模式", None),
+        ];
+        let ex = excerpt_for_summary(&msgs, 3000);
+        assert!(ex.contains("重构导出模块"));
+        assert!(ex.contains("改用策略模式"));
+        assert!(!ex.contains("rm -rf x"), "工具调用应排除");
+    }
+
+    #[test]
+    fn summary_request_shape() {
+        let req = build_summary_request("claude-opus-4-8", "用户：你好");
+        assert_eq!(req["model"], "claude-opus-4-8");
+        assert_eq!(req["messages"][0]["role"], "user");
+        assert_eq!(req["messages"][0]["content"], "用户：你好");
+        assert!(req["system"].is_string());
+        assert_eq!(req["max_tokens"], SUMMARY_MAX_TOKENS);
+    }
+
+    #[test]
+    fn parse_summary_structured_json() {
+        let raw = r#"{"gist":"修复登录态丢失","conclusions":["改用Cookie","加静默刷新"],"files":["src/auth.ts"]}"#;
+        let s = parse_summary_json(raw).unwrap();
+        assert_eq!(s.gist, "修复登录态丢失");
+        assert_eq!(s.conclusions, vec!["改用Cookie", "加静默刷新"]);
+        assert_eq!(s.files, vec!["src/auth.ts"]);
+    }
+
+    #[test]
+    fn parse_summary_strips_code_fence() {
+        let raw = "```json\n{\"gist\":\"加缓存\",\"conclusions\":[],\"files\":[]}\n```";
+        let s = parse_summary_json(raw).unwrap();
+        assert_eq!(s.gist, "加缓存");
+    }
+
+    #[test]
+    fn parse_summary_degrades_to_gist_when_not_json() {
+        let raw = "这是一段不是 JSON 的纯文本摘要";
+        let s = parse_summary_json(raw).unwrap();
+        assert_eq!(s.gist, "这是一段不是 JSON 的纯文本摘要");
+        assert!(s.conclusions.is_empty());
+        assert!(s.files.is_empty());
+    }
+
+    #[test]
+    fn parse_summary_empty_is_none() {
+        assert!(parse_summary_json("").is_none());
+        assert!(parse_summary_json("   ").is_none());
+    }
+
+    #[test]
+    fn parse_summary_filters_empty_array_items_and_limits() {
+        let raw = r#"{"gist":"x","conclusions":["a","  ","b","c","d","e","f","g"],"files":[]}"#;
+        let s = parse_summary_json(raw).unwrap();
+        // 去空白项 + 限 5 条。
+        assert_eq!(s.conclusions.len(), SUMMARY_CONCLUSION_MAX);
+        assert!(!s.conclusions.iter().any(|c| c.trim().is_empty()));
+    }
+
+    #[test]
+    fn parse_summary_gist_truncated() {
+        let long = "字".repeat(200);
+        let raw = format!(r#"{{"gist":"{}","conclusions":[],"files":[]}}"#, long);
+        let s = parse_summary_json(&raw).unwrap();
+        assert!(s.gist.chars().count() <= SUMMARY_GIST_MAX);
+    }
+
+    #[test]
+    fn parse_summary_response_extracts() {
+        let body = json!({
+            "content": [{"type":"text","text":"{\"gist\":\"测试\",\"conclusions\":[],\"files\":[]}"}]
+        });
+        let s = parse_summary_response(&body).unwrap();
+        assert_eq!(s.gist, "测试");
+    }
+
+    #[test]
+    fn parse_summary_response_handles_missing() {
+        assert!(parse_summary_response(&json!({})).is_none());
+    }
+
+    #[test]
+    fn summary_is_empty_check() {
+        assert!(AiSummary::default().is_empty());
+        let s = AiSummary { gist: "x".into(), conclusions: vec![], files: vec![] };
+        assert!(!s.is_empty());
     }
 }

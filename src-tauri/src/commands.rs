@@ -374,3 +374,61 @@ pub async fn generate_ai_title(
     }
     Ok(Some(title))
 }
+
+/// 读取会话的 AI 摘要缓存（只读，不触网）。无缓存返回 Ok(None)。
+/// 选中会话时回显已有摘要用。
+#[tauri::command]
+pub fn get_ai_summary(
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<Option<ai::AiSummary>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.ai_summary(&file_path).map_err(|e| e.to_string())
+}
+
+/// 按需生成 AI 摘要（结构化三段式）。
+/// - 未启用 / 无 key → Ok(None)；
+/// - 已有缓存且 !force → 返回缓存；
+/// - 否则解析会话内容 → 调 AI → 缓存 → 返回新摘要。
+/// 任何网络/解析失败 → Err（前端静默降级）。与 generate_ai_title 同构（四阶段锁）。
+#[tauri::command]
+pub async fn generate_ai_summary(
+    state: State<'_, AppState>,
+    file_path: String,
+    tool: String,
+    force: bool,
+) -> Result<Option<ai::AiSummary>, String> {
+    // 阶段 1：锁库读配置 + 缓存（不跨 await 持锁）。
+    let cfg = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        if !force {
+            if let Some(cached) = store.ai_summary(&file_path).map_err(|e| e.to_string())? {
+                return Ok(Some(cached));
+            }
+        }
+        store.ai_config().map_err(|e| e.to_string())?
+    };
+    if !cfg.is_usable() {
+        return Ok(None); // 未启用/无 key：静默不生成。
+    }
+
+    // 阶段 2：解析会话内容（纯文件读，无锁）。
+    let (_, messages) = parse_transcript(&file_path, &tool)?;
+    let excerpt = ai::excerpt_for_summary(&messages, ai::SUMMARY_EXCERPT_MAX);
+    if excerpt.trim().is_empty() {
+        return Ok(None);
+    }
+
+    // 阶段 3：await HTTP（无锁）。
+    let summary = ai::request_summary(&cfg, &excerpt).await?;
+
+    // 阶段 4：回锁写缓存（带模型名与生成时间）。
+    let created_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .set_ai_summary(&file_path, &summary, &cfg.model, &created_at)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(Some(summary))
+}
