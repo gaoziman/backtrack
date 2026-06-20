@@ -3,6 +3,7 @@ import { useStore } from "../store";
 import { Tag } from "./Tag";
 import { MessageView } from "./MessageView";
 import { FindBar } from "./FindBar";
+import { AiSummary } from "./AiSummary";
 import { IconCopy, IconDownload, IconFolder, IconTerminal, IconFork, IconSparkle } from "./icons";
 
 export function Reader() {
@@ -86,6 +87,8 @@ export function Reader() {
           </button>
         </div>
       </div>
+
+      <AiSummary session={s} />
 
       <div className="reader-main">
         {findOpen && (

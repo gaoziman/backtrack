@@ -60,3 +60,10 @@ export interface AiConfigDto {
   model: string;
   has_key: boolean;
 }
+
+/// AI 会话摘要（结构化三段式，与 Rust AiSummary 对应）。
+export interface AiSummary {
+  gist: string;
+  conclusions: string[];
+  files: string[];
+}

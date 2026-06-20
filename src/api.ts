@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool, ExportFormat, ForkNode,
-  AiConfigDto,
+  AiConfigDto, AiSummary,
 } from "./types";
 
 export const api = {
@@ -63,6 +63,13 @@ export const api = {
     invoke<void>("test_ai_connection", { baseUrl, apiKey, model }),
   generateAiTitle: (filePath: string, tool: Tool, force: boolean) =>
     invoke<string | null>("generate_ai_title", { filePath, tool, force }),
+  // ---- AI 会话摘要（可选功能，默认关闭）----
+  // 只读缓存（选中会话时回显，不触网）。
+  getAiSummary: (filePath: string) =>
+    invoke<AiSummary | null>("get_ai_summary", { filePath }),
+  // 按需生成（force=true 强制重新生成）。失败抛错，前端静默降级。
+  generateAiSummary: (filePath: string, tool: Tool, force: boolean) =>
+    invoke<AiSummary | null>("generate_ai_summary", { filePath, tool, force }),
   // 订阅后端「索引已更新」事件（文件监听自动刷新）。返回取消订阅函数。
   onIndexUpdated: (cb: (s: ScanSummary) => void): Promise<UnlistenFn> =>
     listen<ScanSummary>("index-updated", (e) => cb(e.payload)),

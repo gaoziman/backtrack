@@ -64,7 +64,13 @@ impl Store {
             CREATE TABLE IF NOT EXISTS starred (cwd TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS custom_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS ai_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);",
+            CREATE TABLE IF NOT EXISTS ai_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ai_summaries (
+                file_path  TEXT PRIMARY KEY,
+                summary    TEXT NOT NULL,
+                model      TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ''
+            );",
         )?;
         // FTS5 全文索引（trigram 子串分词，CJK 友好）。
         // 若运行环境的 SQLite 未编译 FTS5/trigram，则建表失败 → 记录并全程走 LIKE 兜底。
@@ -198,6 +204,11 @@ impl Store {
              (SELECT file_path FROM sessions WHERE cwd = ?1)",
             params![cwd],
         )?;
+        self.conn.execute(
+            "DELETE FROM ai_summaries WHERE file_path IN
+             (SELECT file_path FROM sessions WHERE cwd = ?1)",
+            params![cwd],
+        )?;
         let n = self
             .conn
             .execute("DELETE FROM sessions WHERE cwd = ?1", params![cwd])?;
@@ -220,6 +231,8 @@ impl Store {
                 .execute("DELETE FROM custom_titles WHERE file_path = ?1", params![p])?;
             self.conn
                 .execute("DELETE FROM ai_titles WHERE file_path = ?1", params![p])?;
+            self.conn
+                .execute("DELETE FROM ai_summaries WHERE file_path = ?1", params![p])?;
             n += self
                 .conn
                 .execute("DELETE FROM sessions WHERE file_path = ?1", params![p])?;
@@ -559,6 +572,36 @@ impl Store {
         self.conn.execute(
             "INSERT OR REPLACE INTO ai_titles(file_path, title) VALUES (?1, ?2)",
             params![file_path, title],
+        )?;
+        Ok(())
+    }
+
+    /// 读 AI 摘要缓存（反序列化为 AiSummary）。无缓存或解析失败 → None。
+    pub fn ai_summary(&self, file_path: &str) -> rusqlite::Result<Option<crate::ai::AiSummary>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT summary FROM ai_summaries WHERE file_path = ?1",
+                params![file_path],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    /// 写 AI 摘要缓存（序列化为 JSON）。
+    pub fn set_ai_summary(
+        &self,
+        file_path: &str,
+        summary: &crate::ai::AiSummary,
+        model: &str,
+        created_at: &str,
+    ) -> rusqlite::Result<()> {
+        let json = serde_json::to_string(summary).unwrap_or_default();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ai_summaries(file_path, summary, model, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![file_path, json, model, created_at],
         )?;
         Ok(())
     }
@@ -1088,5 +1131,60 @@ mod tests {
         assert_eq!(s.title_logic_version().unwrap(), 3);
         s.set_title_logic_version(5).unwrap(); // 覆盖
         assert_eq!(s.title_logic_version().unwrap(), 5);
+    }
+
+    // ---- AI 摘要缓存 ----
+
+    /// 摘要缓存读写：写后可反序列化读回，缺省 None。
+    #[test]
+    fn ai_summary_read_write() {
+        use crate::ai::AiSummary;
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.ai_summary("/f/a").unwrap().is_none(), "缺省应为 None");
+
+        let sum = AiSummary {
+            gist: "修复登录态".into(),
+            conclusions: vec!["改用Cookie".into(), "加静默刷新".into()],
+            files: vec!["src/auth.ts".into()],
+        };
+        s.set_ai_summary("/f/a", &sum, "claude-opus-4-8", "2026-06-19").unwrap();
+        let got = s.ai_summary("/f/a").unwrap().unwrap();
+        assert_eq!(got, sum);
+    }
+
+    /// 摘要缓存覆盖写（INSERT OR REPLACE）。
+    #[test]
+    fn ai_summary_replace() {
+        use crate::ai::AiSummary;
+        let s = Store::open_in_memory().unwrap();
+        let a = AiSummary { gist: "旧".into(), conclusions: vec![], files: vec![] };
+        let b = AiSummary { gist: "新".into(), conclusions: vec![], files: vec![] };
+        s.set_ai_summary("/f/a", &a, "m", "t").unwrap();
+        s.set_ai_summary("/f/a", &b, "m", "t").unwrap();
+        assert_eq!(s.ai_summary("/f/a").unwrap().unwrap().gist, "新");
+    }
+
+    /// 删除会话时一并清 ai_summaries（不残留）。
+    #[test]
+    fn delete_cleans_ai_summaries() {
+        use crate::ai::AiSummary;
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("a", "/p/ai", None, "2026-06-16"), "x", "x", "", 0).unwrap();
+        let sum = AiSummary { gist: "摘要".into(), conclusions: vec![], files: vec![] };
+        s.set_ai_summary("/f/a", &sum, "m", "t").unwrap();
+        s.delete_paths(&["/f/a".to_string()]).unwrap();
+        assert!(s.ai_summary("/f/a").unwrap().is_none(), "删除后 ai_summary 应清除");
+    }
+
+    /// delete_cwd 也清 ai_summaries。
+    #[test]
+    fn delete_cwd_cleans_ai_summaries() {
+        use crate::ai::AiSummary;
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("a", "/p/ai", None, "2026-06-16"), "x", "x", "", 0).unwrap();
+        let sum = AiSummary { gist: "摘要".into(), conclusions: vec![], files: vec![] };
+        s.set_ai_summary("/f/a", &sum, "m", "t").unwrap();
+        s.delete_cwd("/p/ai").unwrap();
+        assert!(s.ai_summary("/f/a").unwrap().is_none(), "delete_cwd 后 ai_summary 应清除");
     }
 }

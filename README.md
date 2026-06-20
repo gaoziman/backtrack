@@ -11,7 +11,7 @@
 
 </div>
 
-> 会话散落在 `~/.claude/projects` 与 `~/.codex/sessions`，终端 `/resume` 列表难以辨认，想找回某次对话只能靠 grep。Backtrack 把它们扫成一个可浏览、可搜索、可恢复的本地索引。**纯本地、只读、不联网、不调用任何 AI 模型。**
+> 会话散落在 `~/.claude/projects` 与 `~/.codex/sessions`，终端 `/resume` 列表难以辨认，想找回某次对话只能靠 grep。Backtrack 把它们扫成一个可浏览、可搜索、可恢复的本地索引。**纯本地、只读；默认不联网（仅可选的 AI 标题 / 摘要功能在你主动开启后触网）。**
 
 ![image-20260616211515585](https://gaoziman.oss-cn-hangzhou.aliyuncs.com/uPic/image-20260616211515585.png)
 
@@ -35,13 +35,14 @@
 - **全文搜索** — 跨所有会话子串搜索，**CJK 友好**，命中即点即达。
 - **一键恢复** — 复制 `claude --resume <id>` / `codex resume <id>`，或唤起 iTerm / Terminal / Warp 自动 `cd` 并执行。
 - **整理而不破坏** — 隐藏、关注置顶；删除走**废纸篓**（可恢复），**绝不修改原始 jsonl**。
+- **AI 智能标题与摘要（可选，默认关闭）** — 启发式标题纯本地、不联网；另提供**可选**的云端 LLM 能力：为撞车会话概括标题、为整段对话生成「一句话 / 关键结论 / 涉及代码」三段式摘要。需自行在设置中填写 API 地址、密钥与模型并主动开启；**按需触发、永久缓存、密钥仅存本机、不上传完整 jsonl**。
 
 ## 🧱 技术栈
 
 | 层 | 选型 |
 |----|------|
 | 框架 | Tauri 2 |
-| 后端 | Rust · serde · walkdir · rusqlite(bundled) · rayon · trash · chrono |
+| 后端 | Rust · serde · walkdir · rusqlite(bundled) · rayon · trash · chrono · reqwest（仅可选 AI 功能触网） |
 | 前端 | React 19 · TypeScript · Vite 7 · zustand · Tailwind 4 |
 | 渲染 | react-markdown · remark-gfm · rehype-highlight · highlight.js |
 | 存储 | 磁盘 SQLite（`~/Library/Application Support/de.aigy.backtrack/index.db`） |
@@ -96,9 +97,10 @@ cargo test real_data_smoke -- --ignored --nocapture   # 针对真实磁盘数据
 - [x] 文件变更监听，自动刷新（v0.3.0）
 - [x] 单会话导出 Markdown / HTML（v0.5.0）
 - [x] 搜索过滤器（按工具 / 目录 / 时间）（v0.5.0）
-- [ ] Codex `forked_from` fork 关系可视化
+- [x] Codex `forked_from` fork 关系可视化（v0.6.0）
+- [x] AI 智能标题（v0.6.0）/ AI 会话摘要（v0.7.0）— 可选、默认关闭
 
-**v1 不做**：云同步 · 实时监听 · 导出 · 接入其他工具 · 调用任何 AI 模型。
+**v1 不做**：云同步 · 强制联网 · 默认调用 AI（AI 能力均为可选、默认关闭，密钥仅存本机）。
 
 完整版本更新历史见 [CHANGELOG](CHANGELOG.md)。
 
@@ -108,7 +110,9 @@ cargo test real_data_smoke -- --ignored --nocapture   # 针对真实磁盘数据
 
 ## 🔒 隐私
 
-所有数据仅在本机读取与索引，不上传、不联网、不调用任何远端服务。
+- **核心功能纯本地**：扫描、索引、搜索、阅读、导出、启发式标题，全部仅在本机读取与索引，不上传、不联网。
+- **唯一的可选触网点是 AI 标题 / AI 摘要**：默认**关闭**，需你主动在设置中填写 API 地址、密钥与模型并开启后才会调用。开启后仅在你**手动触发**时，把该会话的对话摘录（排除工具调用与输出）发往**你自己配置的** LLM 接口；**绝不上传完整原始 jsonl，密钥仅存本机、不入代码库、不回传前端明文**。
+- 关闭 AI 功能（默认状态），应用全程不联网。
 
 ## 📄 许可证
 
