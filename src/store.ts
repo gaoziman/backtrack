@@ -3,7 +3,7 @@ import { create } from "zustand";
 import { api } from "./api";
 import type {
   Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool, ExportFormat, ForkNode,
-  AiConfigDto,
+  AiConfigDto, AiSummary,
 } from "./types";
 
 type Theme = "dark" | "light";
@@ -56,6 +56,11 @@ interface AppState {
   aiConfig: AiConfigDto | null; // AI 标题配置（null=未加载）
   settingsOpen: boolean;
 
+  // AI 摘要（当前会话）
+  aiSummary: AiSummary | null;      // 已生成/已缓存的摘要（null=无）
+  aiSummaryLoading: boolean;        // 生成中
+  aiSummaryError: string | null;    // 失败信息（null=无错误）
+
   // actions
   init: () => Promise<void>;
   rescan: () => Promise<void>;
@@ -83,6 +88,9 @@ interface AppState {
   loadAiConfig: () => Promise<void>;
   saveAiConfig: (cfg: { enabled: boolean; baseUrl: string; apiKey: string; model: string }) => Promise<void>;
   regenAiTitle: (s: SessionMeta) => Promise<void>;
+  // AI 摘要：选中会话时回显缓存 / 手动生成（force=true 重新生成）。
+  loadAiSummary: (s: SessionMeta) => Promise<void>;
+  genAiSummary: (s: SessionMeta, force: boolean) => Promise<void>;
   setQuery: (q: string) => void;
   setSearchRole: (r: SearchRole) => void;
   setSearchSince: (t: SearchSince) => void;
@@ -132,6 +140,9 @@ export const useStore = create<AppState>((set, get) => ({
   forkLoading: false,
   aiConfig: null,
   settingsOpen: false,
+  aiSummary: null,
+  aiSummaryLoading: false,
+  aiSummaryError: null,
 
   init: async () => {
     set({ scanning: true });
@@ -235,7 +246,11 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   selectSession: async (s) => {
-    set({ activeSession: s, loadingTranscript: true, transcript: [] });
+    // 切换会话时重置摘要状态（避免串台）。
+    set({
+      activeSession: s, loadingTranscript: true, transcript: [],
+      aiSummary: null, aiSummaryLoading: false, aiSummaryError: null,
+    });
     try {
       const transcript = await api.getTranscript(s.file_path, s.tool);
       set({ transcript, loadingTranscript: false });
@@ -243,6 +258,8 @@ export const useStore = create<AppState>((set, get) => ({
       set({ loadingTranscript: false });
       get().showToast(`加载对话失败: ${e}`);
     }
+    // AI 摘要：只读回显已缓存的摘要（不触网）。仅当仍是当前会话时落地。
+    get().loadAiSummary(s);
     // AI 标题：开启且该会话标题撞车/无意义时，后台静默生成（不阻塞、失败不打断）。
     const cfg = get().aiConfig;
     if (cfg?.enabled && cfg.has_key && shouldGenAiTitle(s, get)) {
@@ -254,6 +271,38 @@ export const useStore = create<AppState>((set, get) => ({
         .catch(() => {
           /* 网络/key 失败 → 静默保持启发式标题 */
         });
+    }
+  },
+
+  // 只读回显该会话已缓存的摘要（不触网）。竞态保护：落地前校验仍是当前会话。
+  loadAiSummary: async (s) => {
+    try {
+      const summary = await api.getAiSummary(s.file_path);
+      if (get().activeSession?.file_path === s.file_path) {
+        set({ aiSummary: summary });
+      }
+    } catch {
+      /* 读缓存失败 → 静默，当作无摘要 */
+    }
+  },
+
+  // 手动生成摘要（force=true 重新生成）。含 loading/error 状态机。
+  genAiSummary: async (s, force) => {
+    set({ aiSummaryLoading: true, aiSummaryError: null });
+    try {
+      const summary = await api.generateAiSummary(s.file_path, s.tool, force);
+      // 仅当仍停留在该会话时落地（防止生成期间切走导致串台）。
+      if (get().activeSession?.file_path === s.file_path) {
+        set({ aiSummary: summary, aiSummaryLoading: false });
+      } else {
+        set({ aiSummaryLoading: false });
+      }
+    } catch (e) {
+      if (get().activeSession?.file_path === s.file_path) {
+        set({ aiSummaryLoading: false, aiSummaryError: String(e) });
+      } else {
+        set({ aiSummaryLoading: false });
+      }
     }
   },
 
