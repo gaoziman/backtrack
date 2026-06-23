@@ -3,13 +3,15 @@ import { create } from "zustand";
 import { api } from "./api";
 import type {
   Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool, ExportFormat, ForkNode,
-  AiConfigDto, AiSummary,
+  AiConfigDto, AiSummary, StatsDto, Collection, CollectionColor,
 } from "./types";
 
 type Theme = "dark" | "light";
 
 // 搜索防抖计时器（模块级，单实例）。
 let searchTimer: number | undefined;
+// 收藏视图搜索防抖计时器。
+let favTimer: number | undefined;
 
 /// 把时间范围转成 ISO 下界；"all" → null。
 function sinceISO(range: SearchSince): string | null {
@@ -56,10 +58,24 @@ interface AppState {
   aiConfig: AiConfigDto | null; // AI 标题配置（null=未加载）
   settingsOpen: boolean;
 
+  // 统计面板（全屏视图，替换右侧阅读区）
+  statsOpen: boolean;
+  stats: StatsDto | null;       // 已加载的统计数据（null=未加载/加载中）
+  statsLoading: boolean;
+
   // AI 摘要（当前会话）
   aiSummary: AiSummary | null;      // 已生成/已缓存的摘要（null=无）
   aiSummaryLoading: boolean;        // 生成中
   aiSummaryError: string | null;    // 失败信息（null=无错误）
+
+  // 收藏 + 分类（Collections）
+  collections: Collection[];                 // 全部分类（按 sort 升序，带计数）
+  favDialogTarget: SessionMeta | null;       // 「收藏到分类」对话框目标会话；null=关闭
+  collectionsOpen: boolean;                  // 收藏视图（全屏）是否打开
+  favSessions: SessionMeta[];                // 收藏视图当前结果
+  favLoading: boolean;                       // 收藏视图加载中
+  favActiveCollection: string | null;        // 收藏视图当前选中分类（null=全部收藏）
+  favQuery: string;                          // 收藏视图搜索词
 
   // actions
   init: () => Promise<void>;
@@ -85,6 +101,8 @@ interface AppState {
   closeFork: () => void;
   openSettings: () => void;
   closeSettings: () => void;
+  openStats: () => Promise<void>;
+  closeStats: () => void;
   loadAiConfig: () => Promise<void>;
   saveAiConfig: (cfg: { enabled: boolean; baseUrl: string; apiKey: string; model: string }) => Promise<void>;
   regenAiTitle: (s: SessionMeta) => Promise<void>;
@@ -108,6 +126,24 @@ interface AppState {
   closeTerminal: () => void;
   doResume: (s: SessionMeta, terminal: string) => Promise<void>;
   showToast: (msg: string) => void;
+
+  // 收藏 + 分类 actions
+  loadCollections: () => Promise<void>;
+  createCollection: (name: string, color: CollectionColor) => Promise<Collection | null>;
+  renameCollection: (id: string, name: string, color: CollectionColor) => Promise<void>;
+  deleteCollection: (id: string) => Promise<void>;
+  reorderCollections: (ids: string[]) => Promise<void>;
+  // 快速收藏/取消（不归类，会话行星标点击用）。
+  toggleFavorite: (s: SessionMeta) => Promise<void>;
+  // 「收藏到分类」对话框：打开 / 关闭 / 保存（覆盖归类）。
+  openFavDialog: (s: SessionMeta) => void;
+  closeFavDialog: () => void;
+  saveFavorite: (filePath: string, collectionIds: string[], on: boolean) => Promise<void>;
+  // 收藏视图（全屏）：打开 / 关闭 / 切分类 / 搜索。
+  openCollections: () => Promise<void>;
+  closeCollections: () => void;
+  setFavCollection: (id: string | null) => Promise<void>;
+  setFavQuery: (q: string) => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -140,14 +176,25 @@ export const useStore = create<AppState>((set, get) => ({
   forkLoading: false,
   aiConfig: null,
   settingsOpen: false,
+  statsOpen: false,
+  stats: null,
+  statsLoading: false,
   aiSummary: null,
   aiSummaryLoading: false,
   aiSummaryError: null,
+  collections: [],
+  favDialogTarget: null,
+  collectionsOpen: false,
+  favSessions: [],
+  favLoading: false,
+  favActiveCollection: null,
+  favQuery: "",
 
   init: async () => {
     set({ scanning: true });
     try {
       get().loadAiConfig(); // 异步加载 AI 配置（不阻塞）
+      get().loadCollections(); // 异步加载收藏分类（不阻塞）
       await api.scan();
       await get().refreshLists();
       set({ scanning: false });
@@ -246,10 +293,11 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   selectSession: async (s) => {
-    // 切换会话时重置摘要状态（避免串台）。
+    // 切换会话时重置摘要状态（避免串台）；并关闭全屏视图（统计/收藏），回到阅读视图。
     set({
       activeSession: s, loadingTranscript: true, transcript: [],
       aiSummary: null, aiSummaryLoading: false, aiSummaryError: null,
+      statsOpen: false, collectionsOpen: false,
     });
     try {
       const transcript = await api.getTranscript(s.file_path, s.tool);
@@ -563,6 +611,22 @@ export const useStore = create<AppState>((set, get) => ({
   openSettings: () => set({ settingsOpen: true }),
   closeSettings: () => set({ settingsOpen: false }),
 
+  // 打开统计面板（全屏视图）：先开面板并置 loading，再异步拉取聚合数据。
+  // 每次打开都重新拉取，保证数据最新（聚合查询轻量，无需缓存）。
+  openStats: async () => {
+    // 与收藏视图互斥：打开统计时关闭收藏视图（两者都是全屏视图）。
+    set({ statsOpen: true, statsLoading: true, collectionsOpen: false });
+    try {
+      const stats = await api.stats();
+      // 竞态保护：仅当面板仍打开时落地结果。
+      if (get().statsOpen) set({ stats, statsLoading: false });
+    } catch (e) {
+      set({ statsLoading: false });
+      get().showToast(`加载统计失败: ${e}`);
+    }
+  },
+  closeStats: () => set({ statsOpen: false }),
+
   loadAiConfig: async () => {
     try {
       const aiConfig = await api.getAiConfig();
@@ -610,6 +674,124 @@ export const useStore = create<AppState>((set, get) => ({
       if (get().toast === msg) set({ toast: null });
     }, 2400);
   },
+
+  // ============ 收藏 + 分类（Collections）============
+
+  loadCollections: async () => {
+    try {
+      const collections = await api.listCollections();
+      set({ collections });
+    } catch {
+      /* 分类加载失败不阻塞主流程 */
+    }
+  },
+
+  createCollection: async (name, color) => {
+    try {
+      const c = await api.createCollection(name, color);
+      await get().loadCollections();
+      return c;
+    } catch (e) {
+      get().showToast(`新建分类失败: ${e}`);
+      return null;
+    }
+  },
+
+  renameCollection: async (id, name, color) => {
+    try {
+      await api.renameCollection(id, name, color);
+      await get().loadCollections();
+    } catch (e) {
+      get().showToast(`更新分类失败: ${e}`);
+    }
+  },
+
+  deleteCollection: async (id) => {
+    try {
+      await api.deleteCollection(id);
+      await get().loadCollections();
+      // 若收藏视图正停在被删分类上，回到「全部收藏」。
+      if (get().favActiveCollection === id) await get().setFavCollection(null);
+      get().showToast("已删除分类");
+    } catch (e) {
+      get().showToast(`删除分类失败: ${e}`);
+    }
+  },
+
+  reorderCollections: async (ids) => {
+    // 乐观更新：先按新顺序重排本地，再持久化。
+    const byId = new Map(get().collections.map((c) => [c.id, c]));
+    const next = ids.map((id) => byId.get(id)).filter(Boolean) as Collection[];
+    set({ collections: next });
+    try {
+      await api.reorderCollections(ids);
+      // 排序变化会影响会话归类色点的呈现顺序（collection_ids 按 sort 排），若收藏视图开着则刷新。
+      if (get().collectionsOpen) await get().setFavCollection(get().favActiveCollection);
+    } catch (e) {
+      get().showToast(`排序失败: ${e}`);
+      await get().loadCollections(); // 回滚为后端真实顺序
+      if (get().collectionsOpen) await get().setFavCollection(get().favActiveCollection);
+    }
+  },
+
+  toggleFavorite: async (s) => {
+    const on = !s.favorited;
+    try {
+      // 快速收藏不改变已有归类：on=true 时保留原 collection_ids，on=false 时清空。
+      await api.setFavorite(s.file_path, on ? (s.collection_ids ?? []) : [], on);
+      applyFavorite(set, get, s.file_path, on, on ? s.collection_ids ?? [] : []);
+      await get().loadCollections(); // 刷新分类计数
+      get().showToast(on ? "已收藏" : "已取消收藏");
+    } catch (e) {
+      get().showToast(`操作失败: ${e}`);
+    }
+  },
+
+  openFavDialog: (s) => set({ favDialogTarget: s }),
+  closeFavDialog: () => set({ favDialogTarget: null }),
+
+  saveFavorite: async (filePath, collectionIds, on) => {
+    try {
+      await api.setFavorite(filePath, collectionIds, on);
+      applyFavorite(set, get, filePath, on, collectionIds);
+      await get().loadCollections();
+      // 若收藏视图开着，刷新当前结果。
+      if (get().collectionsOpen) {
+        await get().setFavCollection(get().favActiveCollection);
+      }
+      set({ favDialogTarget: null });
+      get().showToast(on ? "已保存收藏" : "已取消收藏");
+    } catch (e) {
+      get().showToast(`保存收藏失败: ${e}`);
+    }
+  },
+
+  openCollections: async () => {
+    set({ collectionsOpen: true, statsOpen: false });
+    await get().loadCollections();
+    await get().setFavCollection(get().favActiveCollection);
+  },
+  closeCollections: () => set({ collectionsOpen: false }),
+
+  setFavCollection: async (id) => {
+    set({ favActiveCollection: id, favLoading: true });
+    try {
+      const q = get().favQuery.trim();
+      const favSessions = await api.listFavorites(id, q || null);
+      set({ favSessions, favLoading: false });
+    } catch (e) {
+      set({ favLoading: false });
+      get().showToast(`加载收藏失败: ${e}`);
+    }
+  },
+
+  setFavQuery: (q) => {
+    set({ favQuery: q });
+    if (favTimer) window.clearTimeout(favTimer);
+    favTimer = window.setTimeout(() => {
+      void get().setFavCollection(get().favActiveCollection);
+    }, 150);
+  },
 }));
 
 // 取路径叶子名（toast 用）
@@ -656,5 +838,27 @@ function applyAiTitle(
   if (sr) {
     patch.searchResults = sr.map((s) => (s.file_path === filePath ? { ...s, title } : s));
   }
+  set(patch);
+}
+
+// 把收藏态/归类就地写入各处会话副本（侧栏缓存 / 当前会话 / 搜索结果 / 收藏视图）。
+function applyFavorite(
+  set: (partial: Partial<AppState> | ((s: AppState) => Partial<AppState>)) => void,
+  get: () => AppState,
+  filePath: string,
+  favorited: boolean,
+  collectionIds: string[],
+): void {
+  const patchOne = (s: SessionMeta): SessionMeta =>
+    s.file_path === filePath ? { ...s, favorited, collection_ids: collectionIds } : s;
+  const sbp = { ...get().sessionsByProject };
+  for (const k of Object.keys(sbp)) sbp[k] = sbp[k].map(patchOne);
+  const patch: Partial<AppState> = { sessionsByProject: sbp };
+  const active = get().activeSession;
+  if (active && active.file_path === filePath) {
+    patch.activeSession = { ...active, favorited, collection_ids: collectionIds };
+  }
+  const sr = get().searchResults;
+  if (sr) patch.searchResults = sr.map(patchOne);
   set(patch);
 }
