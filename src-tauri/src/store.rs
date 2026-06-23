@@ -1,6 +1,14 @@
 //! SQLite 元数据缓存 + 子串搜索（CJK 友好，用 LIKE）。
-use crate::models::{display_name_for, Project, SearchHit, SessionMeta, Tool};
+use crate::models::{
+    display_name_for, Collection, DayCount, DirCount, MonthCount, Project, SearchHit, SessionMeta,
+    StatsDto, Tool, ToolCount,
+};
 use rusqlite::{params, Connection, OptionalExtension};
+
+/// 当前时间字符串（收藏/分类的 created_at 用，仅记录性质，格式与 ai_summary 对齐）。
+fn now_string() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
 /// 短查询阈值：trigram 分词器要求 MATCH 查询 ≥ 3 字符，
 /// 故 1-2 字（中文高频）走 LIKE 兜底，守住 CJK 红线。
@@ -70,7 +78,22 @@ impl Store {
                 summary    TEXT NOT NULL,
                 model      TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT ''
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS collections (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                color      TEXT NOT NULL DEFAULT 'slate',
+                sort       INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS favorites (
+                file_path     TEXT NOT NULL,
+                collection_id TEXT NOT NULL DEFAULT '',
+                created_at    TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (file_path, collection_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fav_collection ON favorites(collection_id);
+            CREATE INDEX IF NOT EXISTS idx_fav_path ON favorites(file_path);",
         )?;
         // FTS5 全文索引（trigram 子串分词，CJK 友好）。
         // 若运行环境的 SQLite 未编译 FTS5/trigram，则建表失败 → 记录并全程走 LIKE 兜底。
@@ -159,6 +182,104 @@ impl Store {
         rows.collect()
     }
 
+    /// 全局使用统计：一次性聚合统计面板所需的全部维度（只读、纯聚合）。
+    /// 时间维度直接用 `started_at` ISO 字符串前缀切片（`substr`），无需解析。
+    pub fn stats(&self) -> rusqlite::Result<StatsDto> {
+        // 总量、最早/最近、目录数、fork 数、正文字符数（一行扫描搞定）。
+        let (total_sessions, total_messages, distinct_dirs, fork_count, total_body_chars, earliest, latest) =
+            self.conn.query_row(
+                "SELECT
+                    COUNT(*),
+                    COALESCE(SUM(msg_count), 0),
+                    COUNT(DISTINCT cwd),
+                    COALESCE(SUM(forked_from IS NOT NULL), 0),
+                    COALESCE(SUM(LENGTH(body)), 0),
+                    MIN(started_at),
+                    MAX(updated_at)
+                 FROM sessions",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)? as usize,
+                        r.get::<_, i64>(1)? as usize,
+                        r.get::<_, i64>(2)? as usize,
+                        r.get::<_, i64>(3)? as usize,
+                        r.get::<_, i64>(4)? as usize,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )?;
+
+        // 按工具计数（降序）。
+        let mut stmt = self.conn.prepare(
+            "SELECT tool, COUNT(*) FROM sessions GROUP BY tool ORDER BY COUNT(*) DESC, tool",
+        )?;
+        let by_tool = stmt
+            .query_map([], |r| {
+                let t: String = r.get(0)?;
+                let n: i64 = r.get(1)?;
+                Ok((t, n as usize))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            // 解析失败的工具行直接跳过（理论上不会出现）。
+            .filter_map(|(t, count)| Tool::from_str(&t).map(|tool| ToolCount { tool, count }))
+            .collect();
+
+        // 按月计数（升序），月份 = started_at 前 7 字符（YYYY-MM）。
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(started_at, 1, 7) m, COUNT(*) FROM sessions
+             GROUP BY m ORDER BY m",
+        )?;
+        let by_month = stmt
+            .query_map([], |r| {
+                Ok(MonthCount { month: r.get::<_, String>(0)?, count: r.get::<_, i64>(1)? as usize })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // 按天计数（升序），日 = started_at 前 10 字符（YYYY-MM-DD）。
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(started_at, 1, 10) d, COUNT(*) FROM sessions
+             GROUP BY d ORDER BY d",
+        )?;
+        let by_day = stmt
+            .query_map([], |r| {
+                Ok(DayCount { day: r.get::<_, String>(0)?, count: r.get::<_, i64>(1)? as usize })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // 最活跃目录（降序）。
+        let mut stmt = self.conn.prepare(
+            "SELECT cwd, COUNT(*) FROM sessions GROUP BY cwd ORDER BY COUNT(*) DESC, cwd",
+        )?;
+        let top_dirs = stmt
+            .query_map([], |r| {
+                let cwd: String = r.get(0)?;
+                let n: i64 = r.get(1)?;
+                Ok(DirCount {
+                    display_name: display_name_for(&cwd),
+                    cwd,
+                    count: n as usize,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(StatsDto {
+            total_sessions,
+            total_messages,
+            total_body_chars,
+            distinct_dirs,
+            fork_count,
+            earliest,
+            latest,
+            by_tool,
+            by_month,
+            by_day,
+            top_dirs,
+        })
+    }
+
     /// 已隐藏的目录（仍有会话的），用于侧栏「已隐藏」分组。
     pub fn list_hidden(&self) -> rusqlite::Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
@@ -209,6 +330,11 @@ impl Store {
              (SELECT file_path FROM sessions WHERE cwd = ?1)",
             params![cwd],
         )?;
+        self.conn.execute(
+            "DELETE FROM favorites WHERE file_path IN
+             (SELECT file_path FROM sessions WHERE cwd = ?1)",
+            params![cwd],
+        )?;
         let n = self
             .conn
             .execute("DELETE FROM sessions WHERE cwd = ?1", params![cwd])?;
@@ -233,6 +359,8 @@ impl Store {
                 .execute("DELETE FROM ai_titles WHERE file_path = ?1", params![p])?;
             self.conn
                 .execute("DELETE FROM ai_summaries WHERE file_path = ?1", params![p])?;
+            self.conn
+                .execute("DELETE FROM favorites WHERE file_path = ?1", params![p])?;
             n += self
                 .conn
                 .execute("DELETE FROM sessions WHERE file_path = ?1", params![p])?;
@@ -280,6 +408,212 @@ impl Store {
         Ok(())
     }
 
+    // ============ 收藏 + 分类（Collections） ============
+    // favorites.collection_id 用空串 '' 作「未分类」哨兵（NULL 在 PK 中互不相等，故不用 NULL）。
+    // favorited = 该 file_path 在 favorites 表有任意行；collection_ids = 其下非空 collection_id 集合。
+
+    /// 取并自增一个单调序列值（分类 id 生成用，存于 meta 表，唯一且不与删除冲突）。
+    fn next_seq(&self, key: &str) -> rusqlite::Result<i64> {
+        let cur: i64 = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let next = cur + 1;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![key, next.to_string()],
+        )?;
+        Ok(next)
+    }
+
+    /// 列出全部分类（按 sort 升序），附带每类收藏计数。
+    pub fn list_collections(&self) -> rusqlite::Result<Vec<Collection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.name, c.color, c.sort,
+                    (SELECT COUNT(*) FROM favorites f WHERE f.collection_id = c.id) AS cnt
+             FROM collections c ORDER BY c.sort ASC, c.id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Collection {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                color: r.get(2)?,
+                sort: r.get(3)?,
+                count: r.get::<_, i64>(4)? as usize,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 新建分类，sort 取当前最大 sort + 1（追加到末尾）。
+    pub fn create_collection(&self, name: &str, color: &str) -> rusqlite::Result<Collection> {
+        let id = format!("col_{}", self.next_seq("collection_seq")?);
+        let sort: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(sort), 0) FROM collections", [], |r| r.get(0))
+            .unwrap_or(0)
+            + 1;
+        let created_at = now_string();
+        self.conn.execute(
+            "INSERT INTO collections(id, name, color, sort, created_at) VALUES (?1,?2,?3,?4,?5)",
+            params![id, name.trim(), color, sort, created_at],
+        )?;
+        Ok(Collection { id, name: name.trim().to_string(), color: color.to_string(), sort, count: 0 })
+    }
+
+    /// 改名 + 改色。
+    pub fn rename_collection(&self, id: &str, name: &str, color: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE collections SET name = ?2, color = ?3 WHERE id = ?1",
+            params![id, name.trim(), color],
+        )?;
+        Ok(())
+    }
+
+    /// 删除分类：该分类下的收藏降级为「未分类」（不丢收藏），再删分类定义。
+    pub fn delete_collection(&self, id: &str) -> rusqlite::Result<()> {
+        // 仅为「除本分类外已无其它收藏行」的会话补未分类哨兵，保住「已收藏」；
+        // 仍属其它分类的会话不补哨兵，避免遗留冗余 '' 行。
+        self.conn.execute(
+            "INSERT OR IGNORE INTO favorites(file_path, collection_id, created_at)
+             SELECT file_path, '', '' FROM favorites
+             WHERE collection_id = ?1
+               AND file_path NOT IN (
+                 SELECT file_path FROM favorites WHERE collection_id <> ?1 AND collection_id <> ''
+               )",
+            params![id],
+        )?;
+        self.conn
+            .execute("DELETE FROM favorites WHERE collection_id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM collections WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// 按给定顺序重排分类（拖拽排序用）：依次写 sort = 0,1,2,…
+    pub fn reorder_collections(&self, ids: &[String]) -> rusqlite::Result<()> {
+        for (i, id) in ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE collections SET sort = ?2 WHERE id = ?1",
+                params![id, i as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 收藏 / 取消收藏一个会话，并（在收藏时）设置其所属分类（覆盖语义）。
+    /// `on=false`：删除该会话全部收藏行。
+    /// `on=true` 且 `collection_ids` 非空：精确归入这些分类（先清旧、再插新）。
+    /// `on=true` 且 `collection_ids` 为空：仅收藏不归类（写未分类哨兵行）。
+    pub fn set_favorite(
+        &self,
+        file_path: &str,
+        collection_ids: &[String],
+        on: bool,
+    ) -> rusqlite::Result<()> {
+        // 先清除该会话现有全部收藏行（覆盖语义，保证幂等）。
+        self.conn
+            .execute("DELETE FROM favorites WHERE file_path = ?1", params![file_path])?;
+        if !on {
+            return Ok(());
+        }
+        let created_at = now_string();
+        if collection_ids.is_empty() {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO favorites(file_path, collection_id, created_at) VALUES (?1, '', ?2)",
+                params![file_path, created_at],
+            )?;
+        } else {
+            for cid in collection_ids {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO favorites(file_path, collection_id, created_at) VALUES (?1, ?2, ?3)",
+                    params![file_path, cid, created_at],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 收藏视图数据：可按分类筛（None=全部收藏），可叠加搜索（None/空=不搜）。
+    /// 每条 overlay favorited=true + collection_ids（所属分类，非空哨兵）。按 updated_at 降序。
+    pub fn list_favorites(
+        &self,
+        collection_id: Option<&str>,
+        query: Option<&str>,
+    ) -> rusqlite::Result<Vec<SessionMeta>> {
+        let q = query.map(str::trim).filter(|s| !s.is_empty());
+        // 收藏会话集合：按分类筛则限定该 collection_id，否则取 favorites 中全部 distinct file_path。
+        let (fav_filter, fav_param): (&str, Option<String>) = match collection_id {
+            Some(cid) => ("WHERE f.collection_id = ?1", Some(cid.to_string())),
+            None => ("", None),
+        };
+        // 搜索:对标题/正文 LIKE 子串(收藏视图数据量小,统一走 LIKE 即可,CJK 友好)。
+        // 复用 escape_like：先转义反斜杠再转义 %/_，避免查询含 `\` 时 ESCAPE 误判（与 like_search 一致）。
+        let like = q.map(|s| format!("%{}%", escape_like(s)));
+        let sql = format!(
+            "SELECT s.id, s.tool, s.cwd, s.file_path,
+                    COALESCE(ct.title, at.title, s.title) AS title,
+                    s.started_at, s.updated_at, s.msg_count, s.forked_from
+             FROM sessions s
+             JOIN (SELECT DISTINCT f.file_path FROM favorites f {fav_filter}) fv
+                  ON fv.file_path = s.file_path
+             LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             LEFT JOIN ai_titles at ON at.file_path = s.file_path
+             {search_clause}
+             ORDER BY s.updated_at DESC",
+            search_clause = if like.is_some() {
+                "WHERE (COALESCE(ct.title, at.title, s.title) LIKE ?S ESCAPE '\\' OR s.body LIKE ?S ESCAPE '\\')"
+            } else {
+                ""
+            }
+        );
+        // 组装参数：fav_param（若有）在前，like（若有）替换占位。
+        let mut metas: Vec<SessionMeta> = {
+            // rusqlite 不支持命名重复占位，手工按出现顺序绑定。
+            let sql = sql.replace("?S", if fav_param.is_some() { "?2" } else { "?1" });
+            let mut stmt = self.conn.prepare(&sql)?;
+            let map = Self::row_to_meta;
+            match (fav_param.as_ref(), like.as_ref()) {
+                (Some(fp), Some(lk)) => stmt.query_map(params![fp, lk], map)?.collect::<rusqlite::Result<Vec<_>>>()?,
+                (Some(fp), None) => stmt.query_map(params![fp], map)?.collect::<rusqlite::Result<Vec<_>>>()?,
+                (None, Some(lk)) => stmt.query_map(params![lk], map)?.collect::<rusqlite::Result<Vec<_>>>()?,
+                (None, None) => stmt.query_map([], map)?.collect::<rusqlite::Result<Vec<_>>>()?,
+            }
+        };
+        // overlay favorited + collection_ids（一次性批量取所有归类，避免 per-row N+1）。
+        let mut by_path = self.collection_ids_by_path()?;
+        for m in metas.iter_mut() {
+            m.favorited = true;
+            m.collection_ids = by_path.remove(&m.file_path).unwrap_or_default();
+        }
+        Ok(metas)
+    }
+
+    /// 一次性取全部「会话→所属分类 id 列表」映射（排除未分类哨兵 ''，按分类 sort 升序）。
+    /// 单次查询，供 list_favorites 批量 overlay，避免逐会话查询的 N+1。
+    fn collection_ids_by_path(&self) -> rusqlite::Result<std::collections::HashMap<String, Vec<String>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.file_path, f.collection_id FROM favorites f
+             JOIN collections c ON c.id = f.collection_id
+             WHERE f.collection_id <> ''
+             ORDER BY c.sort ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for row in rows {
+            let (path, cid) = row?;
+            map.entry(path).or_default().push(cid);
+        }
+        Ok(map)
+    }
+
+
     /// 设置会话自定义标题（独立持久化，读时 override 派生标题，不被增量重索引覆盖）。
     pub fn set_custom_title(&self, file_path: &str, title: &str) -> rusqlite::Result<()> {
         self.conn.execute(
@@ -324,6 +658,9 @@ impl Store {
             forked_from: r.get("forked_from")?,
             // 默认 false；list_sessions 用专用查询覆盖为真实值。
             has_children: false,
+            // 默认 false/空；list_sessions/list_favorites 用专用查询 overlay。
+            favorited: false,
+            collection_ids: Vec::new(),
         })
     }
 
@@ -334,7 +671,8 @@ impl Store {
             "SELECT s.id, s.tool, s.cwd, s.file_path,
                     COALESCE(ct.title, at.title, s.title) AS title,
                     s.started_at, s.updated_at, s.msg_count, s.forked_from,
-                    EXISTS(SELECT 1 FROM sessions f WHERE f.forked_from = s.id) AS has_kids
+                    EXISTS(SELECT 1 FROM sessions f WHERE f.forked_from = s.id) AS has_kids,
+                    EXISTS(SELECT 1 FROM favorites fv WHERE fv.file_path = s.file_path) AS is_fav
              FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
              LEFT JOIN ai_titles at ON at.file_path = s.file_path
              WHERE s.cwd = ?1 ORDER BY s.updated_at DESC",
@@ -359,10 +697,11 @@ impl Store {
             .optional()
     }
 
-    /// 同 row_to_meta，但额外读取 `has_kids` 列填充 has_children。
+    /// 同 row_to_meta，但额外读取 `has_kids`/`is_fav` 列填充 has_children/favorited。
     fn row_to_meta_with_children(r: &rusqlite::Row) -> rusqlite::Result<SessionMeta> {
         let mut m = Self::row_to_meta(r)?;
         m.has_children = r.get::<_, bool>("has_kids")?;
+        m.favorited = r.get::<_, bool>("is_fav")?;
         Ok(m)
     }
 
@@ -696,6 +1035,7 @@ mod tests {
             message_count: 3, forked_from: None,
             resume_command: tool.resume_command(id),
             has_children: false,
+            favorited: false, collection_ids: Vec::new(),
         }
     }
 
@@ -708,6 +1048,108 @@ mod tests {
     fn up_roles(s: &Store, m: &SessionMeta, body_user: &str, body_ai: &str) {
         let body = format!("{}\n{}", body_user, body_ai);
         s.upsert(m, &body, body_user, body_ai, 0).unwrap();
+    }
+
+    /// 统计测试专用：可控制 tool / cwd / started_at / updated_at / forked_from。
+    fn meta_full(
+        id: &str, cwd: &str, tool: Tool, started: &str, updated: &str, forked: Option<&str>,
+    ) -> SessionMeta {
+        SessionMeta {
+            id: id.into(), tool, cwd: cwd.into(),
+            file_path: format!("/f/{}", id), title: id.into(),
+            started_at: started.into(), updated_at: updated.into(),
+            message_count: 10, forked_from: forked.map(|s| s.into()),
+            resume_command: tool.resume_command(id),
+            has_children: false,
+            favorited: false, collection_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stats_empty_db() {
+        let s = Store::open_in_memory().unwrap();
+        let st = s.stats().unwrap();
+        assert_eq!(st.total_sessions, 0);
+        assert_eq!(st.total_messages, 0);
+        assert_eq!(st.distinct_dirs, 0);
+        assert_eq!(st.fork_count, 0);
+        assert_eq!(st.earliest, None);
+        assert_eq!(st.latest, None);
+        assert!(st.by_tool.is_empty());
+        assert!(st.by_month.is_empty());
+        assert!(st.by_day.is_empty());
+        assert!(st.top_dirs.is_empty());
+    }
+
+    #[test]
+    fn stats_totals_and_tools() {
+        let s = Store::open_in_memory().unwrap();
+        // 3 claude + 2 codex，跨两个目录；其中 1 个是 fork。
+        up(&s, &meta_full("a", "/p/ai", Tool::Claude, "2026-04-01T00:00:00Z", "2026-04-01T00:00:00Z", None), "正文");
+        up(&s, &meta_full("b", "/p/ai", Tool::Claude, "2026-05-02T00:00:00Z", "2026-05-02T00:00:00Z", None), "正文");
+        up(&s, &meta_full("c", "/p/ai", Tool::Claude, "2026-06-03T00:00:00Z", "2026-06-03T00:00:00Z", None), "正文");
+        up(&s, &meta_full("d", "/p/hub", Tool::Codex, "2026-06-04T00:00:00Z", "2026-06-04T00:00:00Z", Some("a")), "正文");
+        up(&s, &meta_full("e", "/p/hub", Tool::Codex, "2026-06-05T00:00:00Z", "2026-06-09T00:00:00Z", None), "正文");
+
+        let st = s.stats().unwrap();
+        assert_eq!(st.total_sessions, 5);
+        assert_eq!(st.total_messages, 50); // 5 × msg_count(10)
+        assert_eq!(st.distinct_dirs, 2);
+        assert_eq!(st.fork_count, 1);
+        assert_eq!(st.earliest.as_deref(), Some("2026-04-01T00:00:00Z"));
+        assert_eq!(st.latest.as_deref(), Some("2026-06-09T00:00:00Z"));
+
+        // 工具占比：claude 3 在前（降序）。
+        assert_eq!(st.by_tool.len(), 2);
+        assert_eq!(st.by_tool[0], ToolCount { tool: Tool::Claude, count: 3 });
+        assert_eq!(st.by_tool[1], ToolCount { tool: Tool::Codex, count: 2 });
+    }
+
+    #[test]
+    fn stats_by_month_and_day_ascending() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta_full("a", "/p/ai", Tool::Claude, "2026-06-16T01:00:00Z", "x", None), "正文");
+        up(&s, &meta_full("b", "/p/ai", Tool::Claude, "2026-06-16T09:00:00Z", "x", None), "正文");
+        up(&s, &meta_full("c", "/p/ai", Tool::Claude, "2026-04-10T00:00:00Z", "x", None), "正文");
+
+        let st = s.stats().unwrap();
+        // 按月升序：4 月 1 条、6 月 2 条。
+        assert_eq!(st.by_month, vec![
+            MonthCount { month: "2026-04".into(), count: 1 },
+            MonthCount { month: "2026-06".into(), count: 2 },
+        ]);
+        // 按天升序：04-10 一条、06-16 两条（同日合并）。
+        assert_eq!(st.by_day, vec![
+            DayCount { day: "2026-04-10".into(), count: 1 },
+            DayCount { day: "2026-06-16".into(), count: 2 },
+        ]);
+    }
+
+    #[test]
+    fn stats_top_dirs_descending() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta_full("a", "/p/hub", Tool::Claude, "2026-06-01T00:00:00Z", "x", None), "正文");
+        up(&s, &meta_full("b", "/p/hub", Tool::Claude, "2026-06-02T00:00:00Z", "x", None), "正文");
+        up(&s, &meta_full("c", "/p/hub", Tool::Claude, "2026-06-03T00:00:00Z", "x", None), "正文");
+        up(&s, &meta_full("d", "/p/ai", Tool::Codex, "2026-06-04T00:00:00Z", "x", None), "正文");
+
+        let st = s.stats().unwrap();
+        assert_eq!(st.top_dirs.len(), 2);
+        assert_eq!(st.top_dirs[0].cwd, "/p/hub");
+        assert_eq!(st.top_dirs[0].count, 3);
+        assert_eq!(st.top_dirs[0].display_name, display_name_for("/p/hub"));
+        assert_eq!(st.top_dirs[1].cwd, "/p/ai");
+        assert_eq!(st.top_dirs[1].count, 1);
+    }
+
+    #[test]
+    fn stats_body_chars_sums_merged_body() {
+        let s = Store::open_in_memory().unwrap();
+        // 中文每字 1 char；"正文内容" = 4 chars，两条 = 8。
+        up(&s, &meta_full("a", "/p/ai", Tool::Claude, "2026-06-01T00:00:00Z", "x", None), "正文内容");
+        up(&s, &meta_full("b", "/p/ai", Tool::Claude, "2026-06-02T00:00:00Z", "x", None), "正文内容");
+        let st = s.stats().unwrap();
+        assert_eq!(st.total_body_chars, 8);
     }
 
     #[test]
@@ -1047,6 +1489,7 @@ mod tests {
             started_at: updated.into(), updated_at: updated.into(),
             message_count: 1, forked_from: parent.map(|x| x.into()),
             resume_command: Tool::Codex.resume_command(id), has_children: false,
+            favorited: false, collection_ids: Vec::new(),
         }
     }
 
@@ -1186,5 +1629,185 @@ mod tests {
         s.set_ai_summary("/f/a", &sum, "m", "t").unwrap();
         s.delete_cwd("/p/ai").unwrap();
         assert!(s.ai_summary("/f/a").unwrap().is_none(), "delete_cwd 后 ai_summary 应清除");
+    }
+
+    // ============ 收藏 + 分类（Collections）测试 ============
+
+    #[test]
+    fn collection_crud() {
+        let s = Store::open_in_memory().unwrap();
+        // 创建 → 返回带 id 的分类，sort 自增。
+        let c1 = s.create_collection("踩坑记录", "coral").unwrap();
+        let c2 = s.create_collection("重构方案", "teal").unwrap();
+        assert_eq!(c1.name, "踩坑记录");
+        assert_eq!(c1.color, "coral");
+        assert!(c2.sort > c1.sort, "新分类 sort 应递增");
+
+        // 列出（按 sort 升序）。
+        let list = s.list_collections().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, c1.id);
+        assert_eq!(list[1].id, c2.id);
+
+        // 改名 + 改色。
+        s.rename_collection(&c1.id, "踩坑", "amber").unwrap();
+        let list = s.list_collections().unwrap();
+        assert_eq!(list[0].name, "踩坑");
+        assert_eq!(list[0].color, "amber");
+
+        // 删除。
+        s.delete_collection(&c2.id).unwrap();
+        assert_eq!(s.list_collections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reorder_collections_sets_new_order() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.create_collection("A", "slate").unwrap();
+        let b = s.create_collection("B", "slate").unwrap();
+        let c = s.create_collection("C", "slate").unwrap();
+        // 重排为 c, a, b。
+        s.reorder_collections(&[c.id.clone(), a.id.clone(), b.id.clone()]).unwrap();
+        let list = s.list_collections().unwrap();
+        assert_eq!(list.iter().map(|x| x.id.clone()).collect::<Vec<_>>(), vec![c.id, a.id, b.id]);
+    }
+
+    #[test]
+    fn set_favorite_toggles_and_overlays() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "会话A", "2026-06-16"), "正文");
+        // 收藏（未归类）。
+        s.set_favorite("/f/a", &[], true).unwrap();
+        let sessions = s.list_sessions("/p/ai").unwrap();
+        assert!(sessions[0].favorited, "收藏后 list_sessions 应 overlay favorited=true");
+        // 取消收藏。
+        s.set_favorite("/f/a", &[], false).unwrap();
+        let sessions = s.list_sessions("/p/ai").unwrap();
+        assert!(!sessions[0].favorited, "取消收藏后 favorited=false");
+    }
+
+    #[test]
+    fn set_favorite_with_collections_is_idempotent() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "会话A", "2026-06-16"), "正文");
+        let c1 = s.create_collection("踩坑", "coral").unwrap();
+        let c2 = s.create_collection("灵感", "amber").unwrap();
+        // 收藏并归入两个分类。
+        s.set_favorite("/f/a", &[c1.id.clone(), c2.id.clone()], true).unwrap();
+        // 幂等：重复设置同样的分类不应报错或翻倍。
+        s.set_favorite("/f/a", &[c1.id.clone(), c2.id.clone()], true).unwrap();
+        // 各分类计数应为 1。
+        let list = s.list_collections().unwrap();
+        let cc1 = list.iter().find(|c| c.id == c1.id).unwrap();
+        assert_eq!(cc1.count, 1, "分类 count 应为 1（幂等）");
+        // 改为仅归入 c1（覆盖语义：从 c2 移除）。
+        s.set_favorite("/f/a", &[c1.id.clone()], true).unwrap();
+        let list = s.list_collections().unwrap();
+        assert_eq!(list.iter().find(|c| c.id == c1.id).unwrap().count, 1);
+        assert_eq!(list.iter().find(|c| c.id == c2.id).unwrap().count, 0, "改归类后 c2 应不再含此会话");
+    }
+
+    #[test]
+    fn list_favorites_filters_by_collection_and_query() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "数据库泄漏排查", "2026-06-16"), "连接池正文");
+        up(&s, &meta("b", "/p/ai", "重构索引器", "2026-06-15"), "rayon 并行正文");
+        up(&s, &meta("c", "/p/ai", "随便聊聊", "2026-06-14"), "闲聊正文");
+        let c1 = s.create_collection("踩坑", "coral").unwrap();
+        s.set_favorite("/f/a", &[c1.id.clone()], true).unwrap();
+        s.set_favorite("/f/b", &[], true).unwrap(); // 收藏但未归类
+        // c 不收藏。
+
+        // 全部收藏：a + b（按 updated_at 降序）。
+        let all = s.list_favorites(None, None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].file_path, "/f/a");
+        assert!(all.iter().all(|m| m.favorited), "list_favorites 结果都应 favorited=true");
+
+        // 按分类筛：仅 c1 → a。
+        let in_c1 = s.list_favorites(Some(&c1.id), None).unwrap();
+        assert_eq!(in_c1.len(), 1);
+        assert_eq!(in_c1[0].file_path, "/f/a");
+        assert!(in_c1[0].collection_ids.contains(&c1.id), "结果应带所属 collection_ids");
+
+        // 收藏视图搜索：在全部收藏中搜「索引」→ 仅 b。
+        let hit = s.list_favorites(None, Some("索引")).unwrap();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].file_path, "/f/b");
+
+        // 搜索 + 分类组合：在 c1 中搜「索引」→ 空（b 不在 c1）。
+        let none = s.list_favorites(Some(&c1.id), Some("索引")).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn delete_collection_demotes_favorites_not_drops() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "会话A", "2026-06-16"), "正文");
+        let c1 = s.create_collection("踩坑", "coral").unwrap();
+        s.set_favorite("/f/a", &[c1.id.clone()], true).unwrap();
+        // 删除分类 → 会话仍被收藏（降级为未分类），不丢收藏。
+        s.delete_collection(&c1.id).unwrap();
+        let all = s.list_favorites(None, None).unwrap();
+        assert_eq!(all.len(), 1, "删分类后会话仍收藏");
+        assert!(all[0].collection_ids.is_empty(), "删分类后该会话降级为未分类");
+    }
+
+    #[test]
+    fn delete_collection_keeps_multi_collection_session_classified() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "会话A", "2026-06-16"), "正文");
+        let c1 = s.create_collection("踩坑", "coral").unwrap();
+        let c2 = s.create_collection("灵感", "amber").unwrap();
+        // 会话同属两个分类。
+        s.set_favorite("/f/a", &[c1.id.clone(), c2.id.clone()], true).unwrap();
+        // 删除 c1：会话仍属 c2，不应留下冗余 '' 哨兵行。
+        s.delete_collection(&c1.id).unwrap();
+        let in_c2 = s.list_favorites(Some(&c2.id), None).unwrap();
+        assert_eq!(in_c2.len(), 1, "删 c1 后会话仍在 c2");
+        assert_eq!(in_c2[0].collection_ids, vec![c2.id.clone()], "仍仅归类 c2,无未分类残留");
+        // favorites 表中不应有该会话的 '' 哨兵行（仅剩 c2 一行）。
+        let sentinel_cnt: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM favorites WHERE file_path = '/f/a' AND collection_id = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel_cnt, 0, "多分类会话删其一分类后不应留下冗余未分类哨兵");
+    }
+
+    #[test]
+    fn list_favorites_escapes_backslash_in_query() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "路径 C:\\Users\\leo", "2026-06-16"), "windows 路径正文");
+        up(&s, &meta("b", "/p/ai", "无关会话", "2026-06-15"), "其它正文");
+        s.set_favorite("/f/a", &[], true).unwrap();
+        s.set_favorite("/f/b", &[], true).unwrap();
+        // 含反斜杠的查询应安全匹配（不因 ESCAPE 误判而报错或错配）。
+        let hit = s.list_favorites(None, Some("C:\\Users")).unwrap();
+        assert_eq!(hit.len(), 1, "含反斜杠查询应正确命中标题");
+        assert_eq!(hit[0].file_path, "/f/a");
+    }
+
+    #[test]
+    fn delete_paths_cleans_favorites() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "会话A", "2026-06-16"), "正文");
+        let c1 = s.create_collection("踩坑", "coral").unwrap();
+        s.set_favorite("/f/a", &[c1.id.clone()], true).unwrap();
+        s.delete_paths(&["/f/a".to_string()]).unwrap();
+        assert!(s.list_favorites(None, None).unwrap().is_empty(), "删除会话应清理 favorites");
+        assert_eq!(s.list_collections().unwrap()[0].count, 0, "删除会话后分类 count 归零");
+    }
+
+    #[test]
+    fn delete_cwd_cleans_favorites() {
+        let s = Store::open_in_memory().unwrap();
+        up(&s, &meta("a", "/p/ai", "会话A", "2026-06-16"), "正文");
+        s.set_favorite("/f/a", &[], true).unwrap();
+        s.delete_cwd("/p/ai").unwrap();
+        assert!(s.list_favorites(None, None).unwrap().is_empty(), "delete_cwd 应清理 favorites");
     }
 }

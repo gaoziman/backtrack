@@ -3,13 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool, ExportFormat, ForkNode,
-  AiConfigDto, AiSummary,
+  AiConfigDto, AiSummary, StatsDto, Collection, CollectionColor,
 } from "./types";
 
 export const api = {
   scan: () => invoke<ScanSummary>("scan"),
   listProjects: () => invoke<Project[]>("list_projects"),
   listSessions: (cwd: string) => invoke<SessionMeta[]>("list_sessions", { cwd }),
+  // 全局使用统计（统计面板，只读聚合，不触网）。
+  stats: () => invoke<StatsDto>("stats"),
   search: (
     query: string,
     opts?: { role?: SearchRole; since?: string | null; tools?: Tool[]; cwd?: string | null },
@@ -70,6 +72,20 @@ export const api = {
   // 按需生成（force=true 强制重新生成）。失败抛错，前端静默降级。
   generateAiSummary: (filePath: string, tool: Tool, force: boolean) =>
     invoke<AiSummary | null>("generate_ai_summary", { filePath, tool, force }),
+  // ---- 收藏 + 分类（Collections）----
+  listCollections: () => invoke<Collection[]>("list_collections"),
+  createCollection: (name: string, color: CollectionColor) =>
+    invoke<Collection>("create_collection", { name, color }),
+  renameCollection: (id: string, name: string, color: CollectionColor) =>
+    invoke<void>("rename_collection", { id, name, color }),
+  deleteCollection: (id: string) => invoke<void>("delete_collection", { id }),
+  reorderCollections: (ids: string[]) => invoke<void>("reorder_collections", { ids }),
+  // 收藏/取消会话并设置所属分类（覆盖语义）。collectionIds 为空 + on=true = 仅收藏不归类。
+  setFavorite: (filePath: string, collectionIds: string[], on: boolean) =>
+    invoke<void>("set_favorite", { filePath, collectionIds, on }),
+  // 收藏视图数据：collectionId=null 取全部收藏；query 非空叠加搜索。
+  listFavorites: (collectionId: string | null, query: string | null) =>
+    invoke<SessionMeta[]>("list_favorites", { collectionId, query }),
   // 订阅后端「索引已更新」事件（文件监听自动刷新）。返回取消订阅函数。
   onIndexUpdated: (cb: (s: ScanSummary) => void): Promise<UnlistenFn> =>
     listen<ScanSummary>("index-updated", (e) => cb(e.payload)),

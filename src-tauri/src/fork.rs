@@ -144,6 +144,8 @@ mod tests {
             forked_from: parent.map(|x| x.into()),
             resume_command: format!("codex resume '{}'", id),
             has_children: false,
+            favorited: false,
+            collection_ids: Vec::new(),
         }
     }
 

@@ -163,6 +163,8 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         message_count: messages.len(),
         forked_from,
         has_children: false,
+        favorited: false,
+        collection_ids: Vec::new(),
     };
     Some((meta, messages))
 }

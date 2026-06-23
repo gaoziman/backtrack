@@ -29,6 +29,7 @@ pub fn run() {
             commands::scan,
             commands::list_projects,
             commands::list_sessions,
+            commands::stats,
             commands::search,
             commands::get_transcript,
             commands::export_session,
@@ -50,6 +51,13 @@ pub fn run() {
             commands::generate_ai_title,
             commands::get_ai_summary,
             commands::generate_ai_summary,
+            commands::list_collections,
+            commands::create_collection,
+            commands::rename_collection,
+            commands::delete_collection,
+            commands::reorder_collections,
+            commands::set_favorite,
+            commands::list_favorites,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

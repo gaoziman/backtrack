@@ -4,6 +4,7 @@ import { api } from "./api";
 import { TopBar } from "./components/TopBar";
 import { Sidebar } from "./components/Sidebar";
 import { Reader } from "./components/Reader";
+import { StatsPanel } from "./components/StatsPanel";
 import { TerminalModal } from "./components/TerminalModal";
 import { Toast } from "./components/Toast";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -12,6 +13,8 @@ import { RenameDialog } from "./components/RenameDialog";
 import { ExportDialog } from "./components/ExportDialog";
 import { ForkTreeDialog } from "./components/ForkTreeDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { CollectionsPanel } from "./components/CollectionsPanel";
+import { FavoriteDialog } from "./components/FavoriteDialog";
 
 export default function App() {
   const init = useStore((s) => s.init);
@@ -20,6 +23,11 @@ export default function App() {
   const closeExport = useStore((s) => s.closeExport);
   const closeFork = useStore((s) => s.closeFork);
   const closeSettings = useStore((s) => s.closeSettings);
+  const closeStats = useStore((s) => s.closeStats);
+  const statsOpen = useStore((s) => s.statsOpen);
+  const closeCollections = useStore((s) => s.closeCollections);
+  const closeFavDialog = useStore((s) => s.closeFavDialog);
+  const collectionsOpen = useStore((s) => s.collectionsOpen);
   const [sideW, setSideW] = useState(288);
   const dragging = useRef(false);
 
@@ -51,11 +59,14 @@ export default function App() {
         closeExport();
         closeFork();
         closeSettings();
+        closeStats();
+        closeCollections();
+        closeFavDialog();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [closeTerminal, cancelDelete, closeExport, closeFork, closeSettings]);
+  }, [closeTerminal, cancelDelete, closeExport, closeFork, closeSettings, closeStats, closeCollections, closeFavDialog]);
 
   // 左栏拖拽改宽（220–380）
   const startResize = (e: React.MouseEvent) => {
@@ -82,9 +93,13 @@ export default function App() {
     <div className="app">
       <TopBar />
       <div className="body">
-        <Sidebar width={sideW} />
-        <div className="resize" onMouseDown={startResize} />
-        <Reader />
+        {!collectionsOpen && !statsOpen && (
+          <>
+            <Sidebar width={sideW} />
+            <div className="resize" onMouseDown={startResize} />
+          </>
+        )}
+        {collectionsOpen ? <CollectionsPanel /> : statsOpen ? <StatsPanel /> : <Reader />}
       </div>
       <TerminalModal />
       <ConfirmDialog />
@@ -93,6 +108,7 @@ export default function App() {
       <ExportDialog />
       <ForkTreeDialog />
       <SettingsDialog />
+      <FavoriteDialog />
       <Toast />
     </div>
   );

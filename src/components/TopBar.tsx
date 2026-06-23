@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import { useStore } from "../store";
-import { IconLogo, IconMoon, IconSearch, IconSettings } from "./icons";
+import { IconBookmark, IconBookmarkFilled, IconChart, IconLogo, IconMoon, IconSearch, IconSettings } from "./icons";
 
 const SINCE_OPTS = [["all", "全部"], ["7d", "近7天"], ["30d", "近30天"]] as const;
 const ROLE_OPTS = [["all", "全部"], ["user", "我"], ["ai", "AI"]] as const;
@@ -9,7 +9,8 @@ export function TopBar() {
   const {
     query, setQuery, toolFilter, toggleTool, toggleTheme,
     searchRole, searchSince, setSearchRole, setSearchSince,
-    searchCwd, setSearchCwd, projects, openSettings,
+    searchCwd, setSearchCwd, projects, openSettings, openStats, statsOpen, closeStats,
+    collectionsOpen, openCollections, closeCollections,
   } = useStore();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -89,6 +90,20 @@ export function TopBar() {
             </button>
           ))}
         </div>
+        <button
+          className={`iconbtn${collectionsOpen ? " on" : ""}`}
+          title="收藏"
+          onClick={() => (collectionsOpen ? closeCollections() : openCollections())}
+        >
+          {collectionsOpen ? <IconBookmarkFilled size={15} /> : <IconBookmark size={15} />}
+        </button>
+        <button
+          className={`iconbtn${statsOpen ? " on" : ""}`}
+          title="使用统计"
+          onClick={() => (statsOpen ? closeStats() : openStats())}
+        >
+          <IconChart size={15} />
+        </button>
         <button className="iconbtn" title="AI 标题设置" onClick={openSettings}>
           <IconSettings size={15} />
         </button>

@@ -4,7 +4,7 @@ import type { Project, SearchHit, SessionMeta } from "../types";
 import { ContextMenu, MenuEntry } from "./ContextMenu";
 import {
   IconChevron, IconCopy, IconDownload, IconEye, IconEyeOff, IconFolder, IconPencil, IconRefresh, IconReveal,
-  IconSliders, IconStar, IconStarFilled, IconTerminal, IconTrash,
+  IconSliders, IconStar, IconStarFilled, IconTerminal, IconTrash, IconBookmark, IconBookmarkFilled,
 } from "./icons";
 
 function leafName(path: string): string {
@@ -45,9 +45,12 @@ export function Sidebar({ width }: { width: number }) {
     activeSession, selectSession,
     hideProject, unhideProject, requestDelete, deleteSessions, revealInFinder, copyCommand,
     starred, viewMode, setViewMode, openManage, toggleStar, openRename, openExport,
+    collections, toggleFavorite, openFavDialog,
   } = useStore();
 
   const starredSet = new Set(starred);
+  // 分类 id → 色板 key（会话行色点用）。
+  const collColor = new Map(collections.map((c) => [c.id, c.color]));
 
   const [menu, setMenu] = useState<MenuState>(null);
   const [hiddenOpen, setHiddenOpen] = useState(false);
@@ -108,6 +111,16 @@ export function Sidebar({ width }: { width: number }) {
     setMenu({
       x: e.clientX, y: e.clientY,
       items: [
+        // 收藏（单会话）：已收藏 → 取消收藏；未收藏 → 快速收藏。「收藏到分类」始终可用。
+        ...(single
+          ? [
+              s.favorited
+                ? { label: "取消收藏", icon: <IconBookmarkFilled size={14} />, onClick: () => toggleFavorite(s) }
+                : { label: "收藏", icon: <IconBookmark size={14} />, onClick: () => toggleFavorite(s) },
+              { label: "收藏到分类…", icon: <IconBookmark size={14} />, onClick: () => openFavDialog(s) },
+              "divider" as const,
+            ]
+          : []),
         { label: "复制 resume 命令", icon: <IconTerminal size={14} />, onClick: () => copyCommand(s.resume_command) },
         // 重命名为单会话操作，多选时隐藏
         ...(single
@@ -127,6 +140,9 @@ export function Sidebar({ width }: { width: number }) {
   const renderSessions = (list: SessionMeta[], q: string) =>
     list.map((s) => {
       const on = selected.has(s.file_path) || activeSession?.file_path === s.file_path;
+      // 该会话首个所属分类的色点（归类标记）。
+      const firstColl = s.collection_ids?.find((id) => collColor.has(id));
+      const dotColor = firstColl ? collColor.get(firstColl) : null;
       return (
         <div
           key={s.file_path}
@@ -136,7 +152,19 @@ export function Sidebar({ width }: { width: number }) {
           title={s.title}
         >
           <span className={`tdot ${s.tool}`} />
+          {dotColor && <span className="cdot" style={{ background: `var(--c-${dotColor})` }} />}
           <span className="st">{hl(s.title, q)}</span>
+          <span
+            className={`fav ${s.favorited ? "on" : ""}`}
+            title={s.favorited ? "已收藏 · 点击编辑" : "收藏"}
+            onClick={(e) => {
+              e.stopPropagation();
+              // 已收藏 → 打开归类对话框；未收藏 → 快速收藏（未分类）。
+              if (s.favorited) openFavDialog(s); else toggleFavorite(s);
+            }}
+          >
+            {s.favorited ? <IconBookmarkFilled size={13} /> : <IconBookmark size={13} />}
+          </span>
           <span className="stime">{relativeTime(s.updated_at)}</span>
         </div>
       );
