@@ -3,7 +3,7 @@ use crate::ai::{self, AiConfig};
 use crate::export::{self, ExportFormat};
 use crate::fork::{build_fork_tree, ForkNode};
 use crate::indexer::{build_index, ScanSummary};
-use crate::models::{Message, Project, SearchHit, SessionMeta, Tool};
+use crate::models::{Collection, Message, Project, SearchHit, SessionMeta, StatsDto, Tool};
 use crate::parsers::{claude, codex};
 use crate::scanner::{default_claude_root, default_codex_root};
 use crate::store::Store;
@@ -51,6 +51,13 @@ pub fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, String>
 pub fn list_sessions(state: State<'_, AppState>, cwd: String) -> Result<Vec<SessionMeta>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store.list_sessions(&cwd).map_err(|e| e.to_string())
+}
+
+/// 全局使用统计（统计面板用，只读聚合，不触网）。
+#[tauri::command]
+pub fn stats(state: State<'_, AppState>) -> Result<StatsDto, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.stats().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -225,6 +232,83 @@ pub fn set_star(state: State<'_, AppState>, cwd: String, starred: bool) -> Resul
 pub fn set_starred_all(state: State<'_, AppState>, cwds: Vec<String>) -> Result<(), String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store.set_starred_all(&cwds).map_err(|e| e.to_string())
+}
+
+// ============ 收藏 + 分类（Collections） ============
+
+#[tauri::command]
+pub fn list_collections(state: State<'_, AppState>) -> Result<Vec<Collection>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.list_collections().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_collection(
+    state: State<'_, AppState>,
+    name: String,
+    color: String,
+) -> Result<Collection, String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("分类名称不能为空".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.create_collection(n, &color).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_collection(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    color: String,
+) -> Result<(), String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("分类名称不能为空".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.rename_collection(&id, n, &color).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_collection(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.delete_collection(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn reorder_collections(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.reorder_collections(&ids).map_err(|e| e.to_string())
+}
+
+/// 收藏 / 取消收藏一个会话，并设置所属分类（覆盖语义）。
+/// on=true 且 collection_ids 为空 = 仅收藏不归类；on=false = 取消收藏。
+#[tauri::command]
+pub fn set_favorite(
+    state: State<'_, AppState>,
+    file_path: String,
+    collection_ids: Vec<String>,
+    on: bool,
+) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store
+        .set_favorite(&file_path, &collection_ids, on)
+        .map_err(|e| e.to_string())
+}
+
+/// 收藏视图数据：collection_id=None 取全部收藏；query 非空时叠加搜索。
+#[tauri::command]
+pub fn list_favorites(
+    state: State<'_, AppState>,
+    collection_id: Option<String>,
+    query: Option<String>,
+) -> Result<Vec<SessionMeta>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store
+        .list_favorites(collection_id.as_deref(), query.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 /// 重命名会话标题：写入自定义标题（独立持久化，读时 override，不被增量重索引覆盖，绝不改原始 jsonl）。

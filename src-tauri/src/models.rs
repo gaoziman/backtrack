@@ -65,6 +65,26 @@ pub struct SessionMeta {
     /// 默认 false；序列化用 default 保证向后兼容、构造可省略。
     #[serde(default)]
     pub has_children: bool,
+    /// 派生字段（非入库）：本会话是否已被收藏。
+    /// 由 list_sessions/list_favorites 查询时 overlay；默认 false，构造可省略。
+    #[serde(default)]
+    pub favorited: bool,
+    /// 派生字段（非入库）：本会话所属分类 id 列表（按分类 sort 升序）。
+    /// 仅在需要时填充（list_favorites / session_by_path）；默认空。
+    #[serde(default)]
+    pub collection_ids: Vec<String>,
+}
+
+/// 收藏分类（用户自建）。`count` 为派生字段（该分类下的收藏数），非入库。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    /// 受控色板的 key（slate/coral/amber/green/teal/indigo/rose/brown）。
+    pub color: String,
+    pub sort: i64,
+    #[serde(default)]
+    pub count: usize,
 }
 
 /// 搜索命中：会话元数据 + 命中正文片段（仅标题命中时片段为 None）。
@@ -91,6 +111,62 @@ pub struct Project {
     pub path: String,
     pub display_name: String,
     pub session_count: usize,
+}
+
+/// 单个工具的会话计数（统计面板工具占比用）。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ToolCount {
+    pub tool: Tool,
+    pub count: usize,
+}
+
+/// 单个目录的会话计数（统计面板「最活跃目录」排行用）。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct DirCount {
+    pub cwd: String,
+    pub display_name: String,
+    pub count: usize,
+}
+
+/// 单月会话计数（统计面板「按月分布」柱状图用）。`month` 形如 `2026-06`。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct MonthCount {
+    pub month: String,
+    pub count: usize,
+}
+
+/// 单日会话计数（统计面板「活跃热力图」用）。`day` 形如 `2026-06-16`。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct DayCount {
+    pub day: String,
+    pub count: usize,
+}
+
+/// 全局使用统计（只读聚合，统计面板一次性取回全部所需数据）。
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct StatsDto {
+    /// 总会话数。
+    pub total_sessions: usize,
+    /// 总消息数（各会话 msg_count 之和）。
+    pub total_messages: usize,
+    /// 正文总字符数，前端按系数估算 token（不在后端硬编码系数，避免口径锁死）。
+    pub total_body_chars: usize,
+    /// 涉及的不同目录数。
+    pub distinct_dirs: usize,
+    /// fork 会话数（forked_from 非空）。
+    pub fork_count: usize,
+    /// 最早会话起始时间（ISO 字符串）；空库为 None。
+    pub earliest: Option<String>,
+    /// 最近会话更新时间（ISO 字符串）；空库为 None。
+    pub latest: Option<String>,
+    /// 按工具计数（claude / codex）。
+    pub by_tool: Vec<ToolCount>,
+    /// 按月计数，升序。
+    pub by_month: Vec<MonthCount>,
+    /// 按天计数，升序（前端取近 N 周渲染热力图）。
+    pub by_day: Vec<DayCount>,
+    /// 最活跃目录，降序（前端取 Top N）。
+    pub top_dirs: Vec<DirCount>,
 }
 
 /// 把绝对 cwd 转成简洁展示名，取末尾 1-2 段。
@@ -154,6 +230,7 @@ mod tests {
             file_path: "/f".into(), title: "t".into(), started_at: "a".into(),
             updated_at: "b".into(), message_count: 2, forked_from: None,
             resume_command: "codex resume id1".into(), has_children: false,
+            favorited: false, collection_ids: Vec::new(),
         };
         let v: serde_json::Value = serde_json::to_value(&m).unwrap();
         assert_eq!(v["tool"], "codex");

@@ -271,6 +271,8 @@ mod tests {
             forked_from: None,
             resume_command: "claude --resume abc".into(),
             has_children: false,
+            favorited: false,
+            collection_ids: Vec::new(),
         }
     }
 
