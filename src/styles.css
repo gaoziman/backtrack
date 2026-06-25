@@ -81,6 +81,14 @@ svg { display: block; }
 .seg button { font: 550 11px var(--sans); color: var(--text-lo); background: transparent; border: none; cursor: pointer; padding: 2px 8px; border-radius: 4px; display: flex; align-items: center; gap: 4px; }
 .seg button.on { color: var(--text-hi); background: var(--side); }
 .seg button.on svg { color: var(--accent); }
+
+/* 侧栏「全部/关注」分段：方案 B · Vercel 精准 —— 去边框盒子，改下划线选中。
+   仅作用于侧栏表头，不影响 TopBar 复用的 .seg（时间/角色过滤器）。 */
+.tree-header .seg { background: none; border: none; border-radius: 0; padding: 0; gap: 14px; }
+.tree-header .seg button { font: 560 12.5px var(--sans); color: var(--text-lo); padding: 4px 1px 7px; border-radius: 0; position: relative; }
+.tree-header .seg button:not(.on):hover { color: var(--text-mid); background: none; }
+.tree-header .seg button.on { color: var(--text-hi); background: none; }
+.tree-header .seg button.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 2px; background: var(--accent); }
 .manage-btn { display: flex; padding: 4px; border-radius: 6px; color: var(--faint); cursor: pointer; }
 .manage-btn:hover { background: var(--hover); color: var(--text-hi); }
 
@@ -100,29 +108,31 @@ svg { display: block; }
 .manage-row .ct { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .modal-head .sub { font-size: 12px; color: var(--text-mid); margin-top: 5px; }
 
-.proj { display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 9px 0 6px; border-radius: var(--radius); cursor: pointer; color: var(--text-mid); position: relative; user-select: none; }
+.proj { display: flex; align-items: center; gap: 7px; height: 36px; padding: 0 8px 0 9px; border-radius: var(--radius); cursor: pointer; color: var(--text-mid); position: relative; user-select: none; }
 .proj:hover { background: var(--hover); }
+/* 方案 B：关注项目 = 左侧 2.5px accent 竖条（克制，取代右侧星色块的视觉重量）*/
+.proj.starred::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2.5px; border-radius: 0 2px 2px 0; background: var(--accent); }
 .proj .chev { width: 14px; color: var(--faint); display: flex; transition: transform .16s ease; flex-shrink: 0; }
 .proj.open .chev { transform: rotate(90deg); }
 .proj .fi { color: var(--text-lo); flex-shrink: 0; display: flex; }
 .proj.open .fi { color: var(--accent); }
-.proj .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 550; color: var(--text-hi); }
-.proj .ct { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 30px; text-align: right; }
+.proj .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.proj .ct { font: 500 11.5px var(--mono); color: var(--faint); font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 34px; text-align: right; }
 
 .kids { position: relative; }
-.kids::before { content: ""; position: absolute; left: 21px; top: 0; bottom: 6px; width: 1px; background: var(--border); }
-.sess { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 9px 0 34px; border-radius: var(--radius); cursor: pointer; position: relative; user-select: none; }
+.kids::before { content: ""; position: absolute; left: 18px; top: 2px; bottom: 6px; width: 1px; background: var(--border); }
+.sess { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px 0 30px; border-radius: 6px; cursor: pointer; position: relative; user-select: none; }
 .sess:hover { background: var(--hover); }
 .sess .tdot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .tdot.claude { background: var(--claude); } .tdot.codex { background: var(--codex); }
 .sess .st { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 480; color: var(--text-mid); }
 .sess .stime { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+/* 方案 B：激活态只用底色 + 文字高亮，不再叠加竖线（消除与 .kids 缩进线的重叠打架）*/
 .sess.active { background: var(--active); }
-.sess.active::before { content: ""; position: absolute; left: 22px; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; background: var(--accent); }
 .sess.active .st { color: var(--text-hi); font-weight: 560; }
 .sess.active .stime { color: var(--text-lo); }
-.sess-empty { padding: 4px 9px 8px 34px; font-size: 11.5px; color: var(--faint); }
-.sess-loading { padding: 4px 9px 8px 34px; }
+.sess-empty { padding: 4px 9px 8px 30px; font-size: 11.5px; color: var(--faint); }
+.sess-loading { padding: 4px 9px 8px 30px; }
 .sk-mini { height: 11px; border-radius: 5px; margin: 5px 0; background: linear-gradient(90deg, var(--hover), var(--panel-3), var(--hover)); background-size: 200% 100%; animation: shimmer 1.3s infinite; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--text-hi); border-radius: 2px; padding: 0 1px; }
@@ -200,6 +210,33 @@ mark { background: color-mix(in srgb, var(--accent) 24%, transparent); color: va
 .ai-field li::before { content: ""; position: absolute; left: 2px; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--faint); }
 .code-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .code-chip { font-family: var(--mono); font-size: 11.5px; color: var(--text-hi); background: var(--panel-3); border: 1px solid var(--border); border-radius: 5px; padding: 3px 8px; }
+
+/* 子代理折叠区（复用 ai-summary 折叠范式） */
+.subagents { border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0; }
+.sa-head { display: flex; align-items: center; gap: 8px; padding: 9px 24px; cursor: pointer; user-select: none; transition: background .12s; }
+.sa-head:hover { background: var(--hover); }
+.sa-head .ico { color: var(--accent); display: flex; }
+.sa-head .label { font-size: 12px; font-weight: 600; color: var(--text-hi); letter-spacing: -.1px; }
+.sa-head .meta { font-size: 11px; color: var(--faint); }
+.sa-head .chev { color: var(--faint); display: flex; margin-left: auto; transition: transform .16s ease; }
+.subagents.open .sa-head .chev { transform: rotate(90deg); }
+.sa-body { padding: 2px 12px 10px; display: flex; flex-direction: column; }
+.sa-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 7px; cursor: pointer; min-width: 0; transition: background .12s; }
+.sa-row:hover { background: var(--hover); }
+.sa-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sa-row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
+.sa-row .dot[data-type="Explore"] { background: var(--accent); }
+.sa-name { font-size: 13px; color: var(--text-hi); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sa-type { font-family: var(--mono); font-size: 10.5px; color: var(--text-mid); background: var(--panel-3); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; flex-shrink: 0; }
+.sa-stat { margin-left: auto; font-size: 11px; color: var(--faint); white-space: nowrap; flex-shrink: 0; }
+
+/* 子代理 drill-in 面包屑 */
+.sa-crumb { display: flex; align-items: center; gap: 8px; padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0; font-size: 12px; }
+.sa-crumb .crumb-back { display: inline-flex; align-items: center; gap: 3px; background: none; border: none; color: var(--accent); cursor: pointer; padding: 2px 4px; border-radius: 5px; font-size: 12px; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sa-crumb .crumb-back:hover { text-decoration: underline; }
+.sa-crumb .crumb-back .chev { transform: rotate(180deg); }
+.sa-crumb .crumb-sep { color: var(--faint); }
+.sa-crumb .crumb-cur { color: var(--text-hi); font-weight: 500; }
 
 .ai-empty { display: flex; align-items: center; gap: 12px; padding: 6px 0 4px; }
 .ai-empty .txt { flex: 1; }
