@@ -73,6 +73,32 @@ pub struct SessionMeta {
     /// 仅在需要时填充（list_favorites / session_by_path）；默认空。
     #[serde(default)]
     pub collection_ids: Vec<String>,
+    /// 父会话 id：本行为子代理（subagent / sidechain）会话时指向其父会话；
+    /// 普通顶层会话为 None。入库列，驱动"顶层列表/统计排除子代理 + 搜索归并"。
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// 派生字段（非入库）：本会话拥有的子代理数量。
+    /// 由 list_sessions 计算，供前端展示折叠区与徽标；默认 0。
+    #[serde(default)]
+    pub subagent_count: usize,
+}
+
+/// 子代理（subagent）摘要项：父会话 Reader 折叠区列表用。
+/// 一个子代理 = `<父uuid>/subagents/agent-*.jsonl` 一个文件。
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct SubagentInfo {
+    /// 子代理 jsonl 文件路径（drill-in 时复用 get_transcript 读取）。
+    pub file_path: String,
+    /// 友好名：.meta.json 的 description → agentType → 首句 → 兜底。
+    pub name: String,
+    /// agentType（如 "Explore" / "general-purpose"）；缺失为空串。
+    pub agent_type: String,
+    /// 消息数。
+    pub message_count: usize,
+    /// 文件体积（字节），前端按 KB 展示。
+    pub size_bytes: u64,
+    /// 起始时间（ISO 字符串），折叠区按此升序。
+    pub started_at: String,
 }
 
 /// 收藏分类（用户自建）。`count` 为派生字段（该分类下的收藏数），非入库。
@@ -231,6 +257,7 @@ mod tests {
             updated_at: "b".into(), message_count: 2, forked_from: None,
             resume_command: "codex resume id1".into(), has_children: false,
             favorited: false, collection_ids: Vec::new(),
+            parent_id: None, subagent_count: 0,
         };
         let v: serde_json::Value = serde_json::to_value(&m).unwrap();
         assert_eq!(v["tool"], "codex");

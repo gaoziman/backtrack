@@ -53,6 +53,16 @@ pub fn list_sessions(state: State<'_, AppState>, cwd: String) -> Result<Vec<Sess
     store.list_sessions(&cwd).map_err(|e| e.to_string())
 }
 
+/// 列出某父会话的全部子代理（折叠区用）。
+#[tauri::command]
+pub fn list_subagents(
+    state: State<'_, AppState>,
+    parent_id: String,
+) -> Result<Vec<crate::models::SubagentInfo>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.list_subagents(&parent_id).map_err(|e| e.to_string())
+}
+
 /// 全局使用统计（统计面板用，只读聚合，不触网）。
 #[tauri::command]
 pub fn stats(state: State<'_, AppState>) -> Result<StatsDto, String> {
@@ -95,7 +105,8 @@ pub fn get_transcript(file_path: String, tool: String) -> Result<Vec<Message>, S
 fn parse_transcript(file_path: &str, tool: &str) -> Result<(SessionMeta, Vec<Message>), String> {
     let path = PathBuf::from(file_path);
     let parsed = match Tool::from_str(tool) {
-        Some(Tool::Claude) => claude::parse_claude(&path),
+        // 子代理文件 path 含 subagents 段时自动带上 parent_id（影响导出标题派生）。
+        Some(Tool::Claude) => claude::parse_claude(&path, crate::scanner::parent_id_from_path(&path)),
         Some(Tool::Codex) => codex::parse_codex(&path),
         None => return Err(format!("未知工具类型: {}", tool)),
     };

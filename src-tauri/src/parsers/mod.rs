@@ -3,6 +3,36 @@ pub mod claude;
 pub mod codex;
 
 use serde_json::Value;
+use std::path::Path;
+
+/// 子代理 `.meta.json` 提炼出的展示信息。
+pub struct SubagentMeta {
+    /// 友好名候选（description 优先，否则 agentType；都缺则空串）。
+    pub name: String,
+    /// agentType（如 "Explore"）；缺失为空串。
+    pub agent_type: String,
+}
+
+/// 读取子代理 jsonl 同名的 `.meta.json`（`agent-x.jsonl` → `agent-x.meta.json`），
+/// 提炼 description / agentType。文件缺失或损坏 → None（由调用方降级到正文派生）。
+///
+/// 标题派生顺序（满足需求 F4）：description → agentType → （上层再退到正文首句 → 兜底）。
+pub fn parse_subagent_meta(jsonl_path: &Path) -> Option<SubagentMeta> {
+    // agent-x.jsonl → agent-x.meta.json
+    let stem = jsonl_path.file_stem()?.to_string_lossy().to_string();
+    let meta_path = jsonl_path.with_file_name(format!("{stem}.meta.json"));
+    let raw = std::fs::read_to_string(&meta_path).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    let agent_type = v.get("agentType").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let desc = v.get("description").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    // description 优先做友好名，缺失退到 agentType。
+    let name = if !desc.is_empty() {
+        desc
+    } else {
+        agent_type.clone()
+    };
+    Some(SubagentMeta { name, agent_type })
+}
 
 /// 把工具调用入参渲染成可读文本（Claude 的 tool_use.input / Codex 的 function_call.arguments）。
 pub fn format_tool_input(name: &str, input: &Value) -> String {
@@ -262,6 +292,44 @@ fn truncate_title(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn subagent_meta_prefers_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("agent-x.jsonl");
+        std::fs::File::create(&jsonl).unwrap().write_all(b"{}").unwrap();
+        std::fs::File::create(dir.path().join("agent-x.meta.json"))
+            .unwrap()
+            .write_all(br#"{"agentType":"Explore","description":"Code search & business logic"}"#)
+            .unwrap();
+        let m = parse_subagent_meta(&jsonl).expect("should read meta");
+        assert_eq!(m.name, "Code search & business logic");
+        assert_eq!(m.agent_type, "Explore");
+    }
+
+    #[test]
+    fn subagent_meta_falls_back_to_agent_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("agent-y.jsonl");
+        std::fs::File::create(&jsonl).unwrap().write_all(b"{}").unwrap();
+        std::fs::File::create(dir.path().join("agent-y.meta.json"))
+            .unwrap()
+            .write_all(br#"{"agentType":"Explore"}"#)
+            .unwrap();
+        let m = parse_subagent_meta(&jsonl).unwrap();
+        assert_eq!(m.name, "Explore", "无 description 时退回 agentType");
+        assert_eq!(m.agent_type, "Explore");
+    }
+
+    #[test]
+    fn subagent_meta_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("agent-z.jsonl");
+        std::fs::File::create(&jsonl).unwrap().write_all(b"{}").unwrap();
+        // 无 .meta.json
+        assert!(parse_subagent_meta(&jsonl).is_none());
+    }
 
     #[test]
     fn flags_system_noise() {

@@ -64,10 +64,12 @@ impl Store {
                 body        TEXT NOT NULL,
                 body_user   TEXT NOT NULL DEFAULT '',
                 body_ai     TEXT NOT NULL DEFAULT '',
-                mtime       INTEGER NOT NULL DEFAULT 0
+                mtime       INTEGER NOT NULL DEFAULT 0,
+                parent_id   TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id);
             CREATE TABLE IF NOT EXISTS hidden (cwd TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS starred (cwd TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS custom_titles (file_path TEXT PRIMARY KEY, title TEXT NOT NULL);
@@ -112,7 +114,8 @@ impl Store {
         Ok(())
     }
 
-    /// 检测既有 sessions 表是否缺少最新列（`mtime`），缺则需重建（旧版本库）。
+    /// 检测既有 sessions 表是否缺少最新列（`mtime` / `parent_id`），缺则需重建（旧版本库）。
+    /// 数据源自 jsonl，重扫无损，避免逐列 ALTER 的兼容分支。
     fn sessions_needs_rebuild(&self) -> rusqlite::Result<bool> {
         let exists: bool = self.conn.query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'",
@@ -126,7 +129,9 @@ impl Store {
         let cols: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(1))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(!cols.iter().any(|c| c == "mtime"))
+        // 任一新列缺失即重建（mtime 为 v0.x 加，parent_id 为子代理特性加）。
+        let needs = !cols.iter().any(|c| c == "mtime") || !cols.iter().any(|c| c == "parent_id");
+        Ok(needs)
     }
 
     /// 写入（或覆盖）一条会话。
@@ -143,11 +148,11 @@ impl Store {
         let (capped, cu, ca) = (cap(body), cap(body_user), cap(body_ai));
         self.conn.execute(
             "INSERT OR REPLACE INTO sessions
-             (id, tool, cwd, file_path, title, started_at, updated_at, msg_count, forked_from, body, body_user, body_ai, mtime)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+             (id, tool, cwd, file_path, title, started_at, updated_at, msg_count, forked_from, body, body_user, body_ai, mtime, parent_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 m.id, m.tool.as_str(), m.cwd, m.file_path, m.title,
-                m.started_at, m.updated_at, m.message_count as i64, m.forked_from, capped, cu, ca, mtime
+                m.started_at, m.updated_at, m.message_count as i64, m.forked_from, capped, cu, ca, mtime, m.parent_id
             ],
         )?;
         if self.has_fts {
@@ -167,7 +172,7 @@ impl Store {
     pub fn list_projects(&self) -> rusqlite::Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
             "SELECT cwd, COUNT(*) FROM sessions
-             WHERE cwd NOT IN (SELECT cwd FROM hidden)
+             WHERE parent_id IS NULL AND cwd NOT IN (SELECT cwd FROM hidden)
              GROUP BY cwd ORDER BY COUNT(*) DESC, cwd",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -186,34 +191,38 @@ impl Store {
     /// 时间维度直接用 `started_at` ISO 字符串前缀切片（`substr`），无需解析。
     pub fn stats(&self) -> rusqlite::Result<StatsDto> {
         // 总量、最早/最近、目录数、fork 数、正文字符数（一行扫描搞定）。
-        let (total_sessions, total_messages, distinct_dirs, fork_count, total_body_chars, earliest, latest) =
+        // 会话维度（COUNT/dirs/fork）排除子代理（parent_id IS NULL）；
+        // total_messages 与正文字符数计入子代理（消息总量口径含子代理交互）。
+        let (total_sessions, distinct_dirs, fork_count, earliest, latest) =
             self.conn.query_row(
                 "SELECT
                     COUNT(*),
-                    COALESCE(SUM(msg_count), 0),
                     COUNT(DISTINCT cwd),
                     COALESCE(SUM(forked_from IS NOT NULL), 0),
-                    COALESCE(SUM(LENGTH(body)), 0),
                     MIN(started_at),
                     MAX(updated_at)
-                 FROM sessions",
+                 FROM sessions WHERE parent_id IS NULL",
                 [],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)? as usize,
                         r.get::<_, i64>(1)? as usize,
                         r.get::<_, i64>(2)? as usize,
-                        r.get::<_, i64>(3)? as usize,
-                        r.get::<_, i64>(4)? as usize,
-                        r.get::<_, Option<String>>(5)?,
-                        r.get::<_, Option<String>>(6)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
                     ))
                 },
             )?;
+        // 消息数与正文字符数：全表（含子代理）。
+        let (total_messages, total_body_chars) = self.conn.query_row(
+            "SELECT COALESCE(SUM(msg_count), 0), COALESCE(SUM(LENGTH(body)), 0) FROM sessions",
+            [],
+            |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as usize)),
+        )?;
 
-        // 按工具计数（降序）。
+        // 按工具计数（降序）。排除子代理。
         let mut stmt = self.conn.prepare(
-            "SELECT tool, COUNT(*) FROM sessions GROUP BY tool ORDER BY COUNT(*) DESC, tool",
+            "SELECT tool, COUNT(*) FROM sessions WHERE parent_id IS NULL GROUP BY tool ORDER BY COUNT(*) DESC, tool",
         )?;
         let by_tool = stmt
             .query_map([], |r| {
@@ -227,10 +236,10 @@ impl Store {
             .filter_map(|(t, count)| Tool::from_str(&t).map(|tool| ToolCount { tool, count }))
             .collect();
 
-        // 按月计数（升序），月份 = started_at 前 7 字符（YYYY-MM）。
+        // 按月计数（升序），月份 = started_at 前 7 字符（YYYY-MM）。排除子代理。
         let mut stmt = self.conn.prepare(
             "SELECT substr(started_at, 1, 7) m, COUNT(*) FROM sessions
-             GROUP BY m ORDER BY m",
+             WHERE parent_id IS NULL GROUP BY m ORDER BY m",
         )?;
         let by_month = stmt
             .query_map([], |r| {
@@ -238,10 +247,10 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // 按天计数（升序），日 = started_at 前 10 字符（YYYY-MM-DD）。
+        // 按天计数（升序），日 = started_at 前 10 字符（YYYY-MM-DD）。排除子代理。
         let mut stmt = self.conn.prepare(
             "SELECT substr(started_at, 1, 10) d, COUNT(*) FROM sessions
-             GROUP BY d ORDER BY d",
+             WHERE parent_id IS NULL GROUP BY d ORDER BY d",
         )?;
         let by_day = stmt
             .query_map([], |r| {
@@ -249,9 +258,9 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // 最活跃目录（降序）。
+        // 最活跃目录（降序）。排除子代理。
         let mut stmt = self.conn.prepare(
-            "SELECT cwd, COUNT(*) FROM sessions GROUP BY cwd ORDER BY COUNT(*) DESC, cwd",
+            "SELECT cwd, COUNT(*) FROM sessions WHERE parent_id IS NULL GROUP BY cwd ORDER BY COUNT(*) DESC, cwd",
         )?;
         let top_dirs = stmt
             .query_map([], |r| {
@@ -285,6 +294,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT s.cwd, COUNT(*) FROM sessions s
              JOIN hidden h ON s.cwd = h.cwd
+             WHERE s.parent_id IS NULL
              GROUP BY s.cwd ORDER BY COUNT(*) DESC, s.cwd",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -560,7 +570,7 @@ impl Store {
                     s.started_at, s.updated_at, s.msg_count, s.forked_from
              FROM sessions s
              JOIN (SELECT DISTINCT f.file_path FROM favorites f {fav_filter}) fv
-                  ON fv.file_path = s.file_path
+                  ON fv.file_path = s.file_path AND s.parent_id IS NULL
              LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
              LEFT JOIN ai_titles at ON at.file_path = s.file_path
              {search_clause}
@@ -661,6 +671,9 @@ impl Store {
             // 默认 false/空；list_sessions/list_favorites 用专用查询 overlay。
             favorited: false,
             collection_ids: Vec::new(),
+            // 子代理特性：默认 None / 0；列表查询按需 overlay parent_id / subagent_count。
+            parent_id: None,
+            subagent_count: 0,
         })
     }
 
@@ -672,13 +685,66 @@ impl Store {
                     COALESCE(ct.title, at.title, s.title) AS title,
                     s.started_at, s.updated_at, s.msg_count, s.forked_from,
                     EXISTS(SELECT 1 FROM sessions f WHERE f.forked_from = s.id) AS has_kids,
-                    EXISTS(SELECT 1 FROM favorites fv WHERE fv.file_path = s.file_path) AS is_fav
+                    EXISTS(SELECT 1 FROM favorites fv WHERE fv.file_path = s.file_path) AS is_fav,
+                    (SELECT COUNT(*) FROM sessions sa WHERE sa.parent_id = s.id) AS sub_count
              FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
              LEFT JOIN ai_titles at ON at.file_path = s.file_path
-             WHERE s.cwd = ?1 ORDER BY s.updated_at DESC",
+             WHERE s.cwd = ?1 AND s.parent_id IS NULL ORDER BY s.updated_at DESC",
         )?;
         let rows = stmt.query_map(params![cwd], Self::row_to_meta_with_children)?;
         rows.collect()
+    }
+
+    /// 列出某父会话的全部子代理（折叠区用），按 started_at 升序。
+    /// 友好名/agentType 取自 .meta.json（解析期已写入 title 字段，agentType 重新读取文件）。
+    pub fn list_subagents(&self, parent_id: &str) -> rusqlite::Result<Vec<crate::models::SubagentInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.file_path, COALESCE(ct.title, s.title) AS name, s.msg_count, s.started_at
+             FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+             WHERE s.parent_id = ?1 ORDER BY s.started_at ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_id], |r| {
+            let file_path: String = r.get(0)?;
+            let name: String = r.get(1)?;
+            let message_count = r.get::<_, i64>(2)? as usize;
+            let started_at: String = r.get(3)?;
+            // agentType 与文件体积从磁盘补充（只读、轻量）。
+            let agent_type = crate::parsers::parse_subagent_meta(std::path::Path::new(&file_path))
+                .map(|m| m.agent_type)
+                .unwrap_or_default();
+            let size_bytes = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+            Ok(crate::models::SubagentInfo {
+                file_path,
+                name,
+                agent_type,
+                message_count,
+                size_bytes,
+                started_at,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 按会话 id 在某 cwd 下取顶层父会话 meta（搜索归并用）。
+    /// 父会话与子代理同 cwd；限定 parent_id IS NULL 确保取到的是顶层会话。
+    fn session_by_path_for_parent(
+        &self,
+        parent_id: &str,
+        cwd: &str,
+    ) -> rusqlite::Result<Option<SessionMeta>> {
+        self.conn
+            .query_row(
+                "SELECT s.id, s.tool, s.cwd, s.file_path,
+                        COALESCE(ct.title, at.title, s.title) AS title,
+                        s.started_at, s.updated_at, s.msg_count, s.forked_from
+                 FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
+                 LEFT JOIN ai_titles at ON at.file_path = s.file_path
+                 WHERE s.id = ?1 AND s.cwd = ?2 AND s.parent_id IS NULL
+                 LIMIT 1",
+                params![parent_id, cwd],
+                Self::row_to_meta,
+            )
+            .optional()
     }
 
     /// 按文件路径取单条会话元数据（fork_tree 命令定位当前会话用）。
@@ -697,16 +763,25 @@ impl Store {
             .optional()
     }
 
-    /// 同 row_to_meta，但额外读取 `has_kids`/`is_fav` 列填充 has_children/favorited。
+    /// 同 row_to_meta，但额外读取 `has_kids`/`is_fav`/`sub_count` 列。
     fn row_to_meta_with_children(r: &rusqlite::Row) -> rusqlite::Result<SessionMeta> {
         let mut m = Self::row_to_meta(r)?;
         m.has_children = r.get::<_, bool>("has_kids")?;
         m.favorited = r.get::<_, bool>("is_fav")?;
+        m.subagent_count = r.get::<_, i64>("sub_count")? as usize;
         Ok(m)
     }
 
     fn row_to_meta_body(r: &rusqlite::Row) -> rusqlite::Result<(SessionMeta, String)> {
         let meta = Self::row_to_meta(r)?;
+        let body: String = r.get("body")?;
+        Ok((meta, body))
+    }
+
+    /// 同 row_to_meta_body，但额外读取 `parent_id` 列（搜索归并用）。
+    fn row_to_meta_body_parent(r: &rusqlite::Row) -> rusqlite::Result<(SessionMeta, String)> {
+        let mut meta = Self::row_to_meta(r)?;
+        meta.parent_id = r.get("parent_id")?;
         let body: String = r.get("body")?;
         Ok((meta, body))
     }
@@ -749,13 +824,40 @@ impl Store {
         } else {
             self.like_search(q, role, since, tools, cwd)?
         };
-        Ok(rows
-            .into_iter()
-            .map(|(meta, body)| SearchHit {
-                snippet: snippet_rust(&body, q, SNIPPET_RADIUS),
-                meta,
-            })
-            .collect())
+        // 子代理命中归并到父会话（ADR-5）：
+        // - parent_id 非空的命中行 → 用其父会话 meta 替换，snippet 前缀标注来源子代理；
+        // - 按父会话去重（同父多个子代理命中保留首个）；
+        // - 父会话不在索引时，退化为显示子代理自身（记为信息缺口）。
+        let mut out: Vec<SearchHit> = Vec::with_capacity(rows.len());
+        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (meta, body) in rows {
+            let snippet = snippet_rust(&body, q, SNIPPET_RADIUS);
+            match meta.parent_id.clone() {
+                Some(pid) => {
+                    // 子代理命中 → 取父会话 meta。
+                    if let Ok(Some(parent)) = self.session_by_path_for_parent(&pid, &meta.cwd) {
+                        if !seen_paths.insert(parent.file_path.clone()) {
+                            continue; // 该父会话已被其它子代理命中，去重
+                        }
+                        let labeled = snippet
+                            .map(|s| format!("[子代理:{}] {}", meta.title, s))
+                            .or_else(|| Some(format!("[子代理:{}]", meta.title)));
+                        out.push(SearchHit { snippet: labeled, meta: parent });
+                    } else {
+                        // 父缺失：退化显示子代理自身。
+                        if seen_paths.insert(meta.file_path.clone()) {
+                            out.push(SearchHit { snippet, meta });
+                        }
+                    }
+                }
+                None => {
+                    if seen_paths.insert(meta.file_path.clone()) {
+                        out.push(SearchHit { snippet, meta });
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn fts_search(
@@ -772,7 +874,7 @@ impl Store {
         let sql = format!(
             "SELECT s.id, s.tool, s.cwd, s.file_path,
                     COALESCE(ct.title, at.title, s.title) AS title,
-                    s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
+                    s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body, s.parent_id
              FROM sessions_fts
              JOIN sessions s ON s.file_path = sessions_fts.file_path
              LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
@@ -786,7 +888,7 @@ impl Store {
         for p in &filter_params {
             params.push(p.as_ref());
         }
-        let rows = stmt.query_map(params.as_slice(), Self::row_to_meta_body)?;
+        let rows = stmt.query_map(params.as_slice(), Self::row_to_meta_body_parent)?;
         rows.collect()
     }
 
@@ -809,7 +911,7 @@ impl Store {
         let sql = format!(
             "SELECT s.id, s.tool, s.cwd, s.file_path,
                     COALESCE(ct.title, at.title, s.title) AS title,
-                    s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body
+                    s.started_at, s.updated_at, s.msg_count, s.forked_from, s.body, s.parent_id
              FROM sessions s LEFT JOIN custom_titles ct ON ct.file_path = s.file_path
              LEFT JOIN ai_titles at ON at.file_path = s.file_path
              WHERE {where_role}
@@ -827,7 +929,7 @@ impl Store {
         for p in &filter_params {
             params.push(p.as_ref());
         }
-        let rows = stmt.query_map(params.as_slice(), Self::row_to_meta_body)?;
+        let rows = stmt.query_map(params.as_slice(), Self::row_to_meta_body_parent)?;
         rows.collect()
     }
 
@@ -1036,6 +1138,7 @@ mod tests {
             resume_command: tool.resume_command(id),
             has_children: false,
             favorited: false, collection_ids: Vec::new(),
+            parent_id: None, subagent_count: 0,
         }
     }
 
@@ -1062,6 +1165,7 @@ mod tests {
             resume_command: tool.resume_command(id),
             has_children: false,
             favorited: false, collection_ids: Vec::new(),
+            parent_id: None, subagent_count: 0,
         }
     }
 
@@ -1490,6 +1594,7 @@ mod tests {
             message_count: 1, forked_from: parent.map(|x| x.into()),
             resume_command: Tool::Codex.resume_command(id), has_children: false,
             favorited: false, collection_ids: Vec::new(),
+            parent_id: None, subagent_count: 0,
         }
     }
 
@@ -1505,6 +1610,99 @@ mod tests {
         let child = list.iter().find(|m| m.id == "child").unwrap();
         assert!(parent.has_children, "被 fork 的父应 has_children=true");
         assert!(!child.has_children, "叶子会话 has_children=false");
+    }
+
+    /// 构造一条子代理 meta（parent_id 指向父会话 id；同 cwd）。
+    fn meta_subagent(id: &str, cwd: &str, parent: &str, file_path: &str) -> SessionMeta {
+        let mut m = meta_fork(id, cwd, None, "2026-06-23");
+        m.file_path = file_path.into();
+        m.parent_id = Some(parent.into());
+        m
+    }
+
+    /// T3/T7：顶层列表与项目计数排除子代理；父会话带 subagent_count。
+    #[test]
+    fn top_level_excludes_subagents_and_counts_them() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("parent", "/p/ai", None, "2026-06-23"), "父正文", "父正文", "", 0).unwrap();
+        s.upsert(&meta_subagent("subA", "/p/ai", "parent", "/p/ai/parent/subagents/agent-A.jsonl"), "子A正文", "子A正文", "", 0).unwrap();
+        s.upsert(&meta_subagent("subB", "/p/ai", "parent", "/p/ai/parent/subagents/agent-B.jsonl"), "子B正文", "子B正文", "", 0).unwrap();
+
+        let list = s.list_sessions("/p/ai").unwrap();
+        assert_eq!(list.len(), 1, "顶层列表应排除子代理");
+        assert_eq!(list[0].id, "parent");
+        assert_eq!(list[0].subagent_count, 2, "父会话应统计到 2 个子代理");
+
+        let projs = s.list_projects().unwrap();
+        let p = projs.iter().find(|p| p.path == "/p/ai").unwrap();
+        assert_eq!(p.session_count, 1, "项目会话数应排除子代理");
+    }
+
+    /// T8：list_subagents 返回某父会话的全部子代理（按 started_at 升序）。
+    #[test]
+    fn list_subagents_returns_children() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("parent", "/p/ai", None, "2026-06-23"), "父", "父", "", 0).unwrap();
+        let mut a = meta_subagent("subA", "/p/ai", "parent", "/p/ai/parent/subagents/agent-A.jsonl");
+        a.title = "code-searcher".into();
+        a.started_at = "2026-06-23T08:00:00Z".into();
+        let mut b = meta_subagent("subB", "/p/ai", "parent", "/p/ai/parent/subagents/agent-B.jsonl");
+        b.title = "pattern-reviewer".into();
+        b.started_at = "2026-06-23T08:05:00Z".into();
+        s.upsert(&b, "子B", "子B", "", 0).unwrap();
+        s.upsert(&a, "子A", "子A", "", 0).unwrap();
+
+        let subs = s.list_subagents("parent").unwrap();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].name, "code-searcher", "应按 started_at 升序");
+        assert_eq!(subs[1].name, "pattern-reviewer");
+        assert!(s.list_subagents("nope").unwrap().is_empty());
+    }
+
+    /// T9：搜索命中子代理正文 → 归并到父会话 + snippet 标注来源。
+    #[test]
+    fn search_remaps_subagent_hit_to_parent() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("parent", "/p/ai", None, "2026-06-23"), "父常规内容", "父常规内容", "", 0).unwrap();
+        let mut a = meta_subagent("subA", "/p/ai", "parent", "/p/ai/parent/subagents/agent-A.jsonl");
+        a.title = "code-searcher".into();
+        s.upsert(&a, "熔断器配置分析", "熔断器配置分析", "", 0).unwrap();
+
+        let hits = s.search("熔断器", None, None).unwrap();
+        assert_eq!(hits.len(), 1, "子代理命中应归并为 1 条父会话结果");
+        assert_eq!(hits[0].meta.id, "parent", "命中应指向父会话");
+        let snip = hits[0].snippet.as_deref().unwrap_or("");
+        assert!(snip.contains("[子代理:code-searcher]"), "snippet 应标注来源子代理，实际: {snip}");
+    }
+
+    /// T9：同一父会话被多个子代理命中 → 按父去重。
+    #[test]
+    fn search_dedups_parent_across_subagents() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("parent", "/p/ai", None, "2026-06-23"), "无关", "无关", "", 0).unwrap();
+        let mut a = meta_subagent("subA", "/p/ai", "parent", "/p/ai/parent/subagents/agent-A.jsonl");
+        a.title = "A".into();
+        let mut b = meta_subagent("subB", "/p/ai", "parent", "/p/ai/parent/subagents/agent-B.jsonl");
+        b.title = "B".into();
+        s.upsert(&a, "共同关键词xyz", "共同关键词xyz", "", 0).unwrap();
+        s.upsert(&b, "共同关键词xyz", "共同关键词xyz", "", 0).unwrap();
+
+        let hits = s.search("关键词xyz", None, None).unwrap();
+        assert_eq!(hits.len(), 1, "两个子代理命中同一父应去重为 1 条");
+        assert_eq!(hits[0].meta.id, "parent");
+    }
+
+    /// 审计修复回归：list_hidden 的会话计数应排除子代理。
+    #[test]
+    fn list_hidden_excludes_subagents_from_count() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert(&meta_fork("parent", "/p/ai", None, "2026-06-23"), "父", "父", "", 0).unwrap();
+        s.upsert(&meta_subagent("subA", "/p/ai", "parent", "/p/ai/parent/subagents/agent-A.jsonl"), "子A", "子A", "", 0).unwrap();
+        s.hide("/p/ai").unwrap();
+
+        let hidden = s.list_hidden().unwrap();
+        let h = hidden.iter().find(|p| p.path == "/p/ai").unwrap();
+        assert_eq!(h.session_count, 1, "已隐藏目录计数应排除子代理");
     }
 
     /// session_by_path 命中与未命中。
