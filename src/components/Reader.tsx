@@ -4,17 +4,21 @@ import { Tag } from "./Tag";
 import { MessageView } from "./MessageView";
 import { FindBar } from "./FindBar";
 import { AiSummary } from "./AiSummary";
-import { IconCopy, IconDownload, IconFolder, IconTerminal, IconFork, IconSparkle } from "./icons";
+import { SubagentBlock } from "./SubagentBlock";
+import { IconCopy, IconDownload, IconFolder, IconTerminal, IconFork, IconSparkle, IconChevron } from "./icons";
 
 export function Reader() {
-  const { activeSession, transcript, loadingTranscript, copyCommand, openTerminal, openExport, openFork, aiConfig, regenAiTitle } = useStore();
+  const {
+    activeSession, transcript, loadingTranscript, copyCommand, openTerminal, openExport, openFork,
+    aiConfig, regenAiTitle, subagents, activeSubagent, backToParent,
+  } = useStore();
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [findOpen, setFindOpen] = useState(false);
 
-  // 切换会话时关闭查找
+  // 切换会话/子代理时关闭查找
   useEffect(() => {
     setFindOpen(false);
-  }, [activeSession?.file_path]);
+  }, [activeSession?.file_path, activeSubagent?.file_path]);
 
   // ⌘F / Ctrl+F 打开会话内查找（有活动会话时拦截浏览器默认查找）
   useEffect(() => {
@@ -88,9 +92,20 @@ export function Reader() {
         </div>
       </div>
 
-      <AiSummary session={s} />
+      {/* drill-in 态隐藏 AI 摘要与子代理折叠区；否则按需展示 */}
+      {!activeSubagent && <AiSummary session={s} />}
+      {!activeSubagent && subagents.length > 0 && <SubagentBlock subagents={subagents} />}
 
       <div className="reader-main">
+        {activeSubagent && (
+          <div className="sa-crumb">
+            <button className="crumb-back" onClick={() => backToParent()}>
+              <IconChevron size={13} /> {s.title}
+            </button>
+            <span className="crumb-sep">›</span>
+            <span className="crumb-cur">{activeSubagent.name || "（子代理会话）"}</span>
+          </div>
+        )}
         {findOpen && (
           <FindBar
             containerRef={transcriptRef}

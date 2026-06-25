@@ -3,7 +3,7 @@ import { create } from "zustand";
 import { api } from "./api";
 import type {
   Message, Project, SearchHit, SearchRole, SearchSince, SessionMeta, Tool, ExportFormat, ForkNode,
-  AiConfigDto, AiSummary, StatsDto, Collection, CollectionColor,
+  AiConfigDto, AiSummary, StatsDto, Collection, CollectionColor, SubagentInfo,
 } from "./types";
 
 type Theme = "dark" | "light";
@@ -30,6 +30,10 @@ interface AppState {
   activeSession: SessionMeta | null;
   transcript: Message[];
   loadingTranscript: boolean;
+  // 子代理折叠区：当前父会话的子代理列表（空=无）。
+  subagents: SubagentInfo[];
+  // drill-in：正在查看的子代理（null=看父会话本身）。
+  activeSubagent: SubagentInfo | null;
 
   // 搜索
   query: string;
@@ -91,6 +95,9 @@ interface AppState {
   deleteSessions: (paths: string[]) => Promise<void>;
   revealInFinder: (path: string, reveal: boolean) => Promise<void>;
   selectSession: (s: SessionMeta) => Promise<void>;
+  // 进入某子代理对话（drill-in）；返回父会话对话。
+  selectSubagent: (sa: SubagentInfo) => Promise<void>;
+  backToParent: () => Promise<void>;
   openRename: (s: SessionMeta) => void;
   closeRename: () => void;
   renameSession: (filePath: string, title: string) => Promise<void>;
@@ -155,6 +162,8 @@ export const useStore = create<AppState>((set, get) => ({
   activeSession: null,
   transcript: [],
   loadingTranscript: false,
+  subagents: [],
+  activeSubagent: null,
   query: "",
   searchResults: null,
   searchRole: "all",
@@ -294,17 +303,31 @@ export const useStore = create<AppState>((set, get) => ({
 
   selectSession: async (s) => {
     // 切换会话时重置摘要状态（避免串台）；并关闭全屏视图（统计/收藏），回到阅读视图。
+    // 同时重置子代理 drill-in 状态。
     set({
       activeSession: s, loadingTranscript: true, transcript: [],
       aiSummary: null, aiSummaryLoading: false, aiSummaryError: null,
       statsOpen: false, collectionsOpen: false,
+      subagents: [], activeSubagent: null,
     });
     try {
       const transcript = await api.getTranscript(s.file_path, s.tool);
-      set({ transcript, loadingTranscript: false });
+      // 仅当仍是当前会话且未进入 drill-in 时落地（防竞态）。
+      if (get().activeSession?.file_path === s.file_path && !get().activeSubagent) {
+        set({ transcript, loadingTranscript: false });
+      }
     } catch (e) {
       set({ loadingTranscript: false });
       get().showToast(`加载对话失败: ${e}`);
+    }
+    // 子代理折叠区：若该会话含子代理，拉取列表（仅当仍是当前会话时落地）。
+    if ((s.subagent_count ?? 0) > 0) {
+      api
+        .listSubagents(s.id)
+        .then((subs) => {
+          if (get().activeSession?.file_path === s.file_path) set({ subagents: subs });
+        })
+        .catch(() => {});
     }
     // AI 摘要：只读回显已缓存的摘要（不触网）。仅当仍是当前会话时落地。
     get().loadAiSummary(s);
@@ -319,6 +342,39 @@ export const useStore = create<AppState>((set, get) => ({
         .catch(() => {
           /* 网络/key 失败 → 静默保持启发式标题 */
         });
+    }
+  },
+
+  // 进入某子代理对话（drill-in）。子代理也是 jsonl，复用 get_transcript 读取。
+  selectSubagent: async (sa) => {
+    const parent = get().activeSession;
+    if (!parent) return;
+    set({ activeSubagent: sa, loadingTranscript: true, transcript: [] });
+    try {
+      const transcript = await api.getTranscript(sa.file_path, parent.tool);
+      // 仅当仍在查看该子代理时落地（防竞态）。
+      if (get().activeSubagent?.file_path === sa.file_path) {
+        set({ transcript, loadingTranscript: false });
+      }
+    } catch (e) {
+      set({ loadingTranscript: false });
+      get().showToast(`加载子代理对话失败: ${e}`);
+    }
+  },
+
+  // 从子代理 drill-in 返回父会话对话。
+  backToParent: async () => {
+    const parent = get().activeSession;
+    if (!parent) return;
+    set({ activeSubagent: null, loadingTranscript: true, transcript: [] });
+    try {
+      const transcript = await api.getTranscript(parent.file_path, parent.tool);
+      if (get().activeSession?.file_path === parent.file_path && !get().activeSubagent) {
+        set({ transcript, loadingTranscript: false });
+      }
+    } catch (e) {
+      set({ loadingTranscript: false });
+      get().showToast(`加载对话失败: ${e}`);
     }
   },
 

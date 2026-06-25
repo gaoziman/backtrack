@@ -25,6 +25,23 @@ export interface SessionMeta {
   favorited?: boolean;
   /// 本会话所属分类 id 列表（后端 list_favorites/session 详情填充）。
   collection_ids?: string[];
+  /// 父会话 id：本会话为子代理时指向父会话；普通会话为 null。
+  parent_id?: string | null;
+  /// 本会话拥有的子代理数量（后端 list_sessions 计算）。
+  subagent_count?: number;
+}
+
+/// 子代理摘要项（父会话折叠区列表用，与 Rust SubagentInfo 对应）。
+export interface SubagentInfo {
+  file_path: string;
+  /// 友好名：.meta.json 的 description → agentType → 首句 → 兜底。
+  name: string;
+  /// agentType（如 "Explore"）；缺失为空串。
+  agent_type: string;
+  message_count: number;
+  /// 文件体积（字节），前端按 KB 展示。
+  size_bytes: number;
+  started_at: string;
 }
 
 /// 收藏分类（与 Rust Collection 对应）。count 为该分类下收藏数。
