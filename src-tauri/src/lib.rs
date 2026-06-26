@@ -29,6 +29,7 @@ pub fn run() {
             commands::scan,
             commands::list_projects,
             commands::list_sessions,
+            commands::list_subagents,
             commands::stats,
             commands::search,
             commands::get_transcript,

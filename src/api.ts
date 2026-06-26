@@ -3,13 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Message, Project, ScanSummary, SearchHit, SearchRole, SessionMeta, Tool, ExportFormat, ForkNode,
-  AiConfigDto, AiSummary, StatsDto, Collection, CollectionColor,
+  AiConfigDto, AiSummary, StatsDto, Collection, CollectionColor, SubagentInfo,
 } from "./types";
 
 export const api = {
   scan: () => invoke<ScanSummary>("scan"),
   listProjects: () => invoke<Project[]>("list_projects"),
   listSessions: (cwd: string) => invoke<SessionMeta[]>("list_sessions", { cwd }),
+  // 列出某父会话的全部子代理（折叠区用）。
+  listSubagents: (parentId: string) => invoke<SubagentInfo[]>("list_subagents", { parentId }),
   // 全局使用统计（统计面板，只读聚合，不触网）。
   stats: () => invoke<StatsDto>("stats"),
   search: (

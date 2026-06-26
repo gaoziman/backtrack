@@ -27,6 +27,10 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
     let mut id: Option<String> = None;
     let mut cwd = String::new();
     let mut forked_from: Option<String> = None;
+    // Codex 子代理（thread_source=="subagent"）：parent_id 取 parent_thread_id，
+    // 标题用 "角色 · 昵称"（agent_role · agent_nickname）。普通会话恒 None。
+    let mut parent_id: Option<String> = None;
+    let mut subagent_title: Option<String> = None;
     let mut first_ts = String::new();
     let mut last_ts = String::new();
     let mut messages: Vec<Message> = Vec::new();
@@ -67,6 +71,36 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
                     .get("forked_from_id")
                     .and_then(|f| f.as_str())
                     .map(|s| s.to_string());
+                // 子代理识别：thread_source=="subagent" → 关联父 thread + 派生「角色 · 昵称」标题。
+                if payload.get("thread_source").and_then(|t| t.as_str()) == Some("subagent") {
+                    let spawn = payload
+                        .get("source")
+                        .and_then(|s| s.get("subagent"))
+                        .and_then(|s| s.get("thread_spawn"));
+                    // parent_thread_id 优先取 payload 顶层，缺失再退到 source.subagent.thread_spawn。
+                    parent_id = payload
+                        .get("parent_thread_id")
+                        .and_then(|p| p.as_str())
+                        .or_else(|| spawn.and_then(|s| s.get("parent_thread_id")).and_then(|p| p.as_str()))
+                        .map(|s| s.to_string());
+                    // 角色/昵称同样优先 payload 顶层。
+                    let role = payload
+                        .get("agent_role")
+                        .and_then(|r| r.as_str())
+                        .or_else(|| spawn.and_then(|s| s.get("agent_role")).and_then(|r| r.as_str()))
+                        .unwrap_or("");
+                    let nick = payload
+                        .get("agent_nickname")
+                        .and_then(|n| n.as_str())
+                        .or_else(|| spawn.and_then(|s| s.get("agent_nickname")).and_then(|n| n.as_str()))
+                        .unwrap_or("");
+                    subagent_title = match (role.trim(), nick.trim()) {
+                        ("", "") => None,
+                        ("", n) => Some(n.to_string()),
+                        (r, "") => Some(r.to_string()),
+                        (r, n) => Some(format!("{r} · {n}")),
+                    };
+                }
             }
             continue;
         }
@@ -147,10 +181,13 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         return None;
     }
 
-    let title = title_with_ai_fallback(
-        first_substantive.as_deref().or(first_user_text.as_deref()),
-        &messages,
-    );
+    // 标题：子代理优先用「角色 · 昵称」；否则走正文派生链（user 实质句 → 首句 → AI 兜底）。
+    let title = subagent_title.unwrap_or_else(|| {
+        title_with_ai_fallback(
+            first_substantive.as_deref().or(first_user_text.as_deref()),
+            &messages,
+        )
+    });
     let meta = SessionMeta {
         resume_command: Tool::Codex.resume_command(&id),
         id,
@@ -165,6 +202,9 @@ pub fn parse_codex(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         has_children: false,
         favorited: false,
         collection_ids: Vec::new(),
+        // Codex 子代理：thread_source=="subagent" 时关联父 thread；否则顶层会话。
+        parent_id,
+        subagent_count: 0,
     };
     Some((meta, messages))
 }
@@ -227,5 +267,38 @@ mod tests {
         assert_eq!(call.text, "date +%H"); // arguments 里的 command 渲染出来
         let out = msgs.iter().find(|m| matches!(m.role, Role::Tool)).unwrap();
         assert_eq!(out.text, "22");
+    }
+
+    /// Codex 子代理：thread_source=subagent → parent_id 取 parent_thread_id，标题用「角色 · 昵称」。
+    const SUBAGENT: &str = r#"{"timestamp":"2026-06-24T01:53:53Z","type":"session_meta","payload":{"session_id":"019ef74e-ab00","id":"019ef755-738a","parent_thread_id":"019ef74e-ab00","cwd":"/Users/leo/hub","thread_source":"subagent","agent_role":"explorer","agent_nickname":"Arendt","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019ef74e-ab00","depth":1,"agent_role":"explorer","agent_nickname":"Arendt"}}}}}
+{"timestamp":"2026-06-24T01:53:54Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"【只读任务】分析数据层"}]}}
+{"timestamp":"2026-06-24T01:53:55Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"好的"}]}}"#;
+
+    #[test]
+    fn detects_codex_subagent() {
+        let dir = write_fixture(SUBAGENT, "rollout-x-019ef755-738a.jsonl");
+        let (meta, _) = parse_codex(&dir.path().join("rollout-x-019ef755-738a.jsonl")).unwrap();
+        assert_eq!(meta.parent_id.as_deref(), Some("019ef74e-ab00"), "子代理应关联父 thread");
+        assert_eq!(meta.title, "explorer · Arendt", "子代理标题用 角色 · 昵称");
+        assert_eq!(meta.id, "019ef755-738a");
+    }
+
+    #[test]
+    fn normal_codex_session_has_no_parent() {
+        // thread_source 缺失（旧版/普通会话）→ parent_id=None，标题走正文派生。
+        let dir = write_fixture(SAMPLE, "normal.jsonl");
+        let (meta, _) = parse_codex(&dir.path().join("normal.jsonl")).unwrap();
+        assert_eq!(meta.parent_id, None);
+        assert_eq!(meta.title, "重构 admin 布局");
+    }
+
+    #[test]
+    fn codex_user_thread_source_is_not_subagent() {
+        // thread_source=user（vscode 顶层会话）→ 不判为子代理。
+        let content = r#"{"timestamp":"t","type":"session_meta","payload":{"id":"top1","cwd":"/p","thread_source":"user","source":"vscode"}}
+{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"你好帮我看代码"}]}}"#;
+        let dir = write_fixture(content, "u.jsonl");
+        let (meta, _) = parse_codex(&dir.path().join("u.jsonl")).unwrap();
+        assert_eq!(meta.parent_id, None, "user 线程不应判为子代理");
     }
 }

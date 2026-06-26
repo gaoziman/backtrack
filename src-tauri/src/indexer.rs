@@ -8,7 +8,9 @@ use std::path::Path;
 
 /// 标题提炼逻辑版本号。每次实质修改 `derive_title` 的提炼规则时 +1，
 /// 触发下次启动全量重建以让旧会话标题用新逻辑重算。
-pub const TITLE_LOGIC_VERSION: i64 = 1;
+/// v2：Codex 子代理识别（thread_source==subagent → parent_id + 「角色·昵称」标题），
+///     需全量重扫让既有 Codex 子代理会话回填 parent_id。
+pub const TITLE_LOGIC_VERSION: i64 = 2;
 
 #[derive(serde::Serialize, Clone, Default)]
 pub struct ScanSummary {
@@ -43,7 +45,7 @@ fn bodies_of(messages: &[Message]) -> (String, String, String) {
 
 fn parse_item(item: &ScanItem) -> Option<(SessionMeta, Vec<Message>)> {
     match item.tool {
-        Tool::Claude => claude::parse_claude(&item.path),
+        Tool::Claude => claude::parse_claude(&item.path, item.parent_id.clone()),
         Tool::Codex => codex::parse_codex(&item.path),
     }
 }
@@ -327,6 +329,94 @@ mod tests {
         for (t,c) in v.iter().take(5) {
             let short: String = t.chars().take(30).collect();
             println!("  {:3}次  {}", c, short);
+        }
+    }
+
+    /// 真实数据子代理验证（默认忽略）：
+    /// `cargo test real_data_subagents -- --ignored --nocapture`
+    /// 验证：子代理被识别并关联父会话、不进顶层列表、父会话带 subagent_count、可 list_subagents。
+    #[test]
+    #[ignore]
+    fn real_data_subagents() {
+        use crate::scanner::{default_claude_root, default_codex_root};
+        use rusqlite::OptionalExtension;
+        let store = Store::open_in_memory().unwrap();
+        let c = default_claude_root().unwrap();
+        let x = default_codex_root().unwrap();
+        build_index(&store, &c, &x);
+
+        // 统计库内子代理总数（parent_id 非空）。
+        let sub_total: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions WHERE parent_id IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        let top_total: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions WHERE parent_id IS NULL", [], |r| r.get(0))
+            .unwrap();
+        println!("\n== 真实数据子代理验证 ==");
+        println!("顶层会话: {top_total} / 子代理: {sub_total}");
+
+        // 找一个有子代理的父会话，验证 list_subagents 与计数。
+        let parent_with_subs: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT parent_id FROM sessions WHERE parent_id IS NOT NULL GROUP BY parent_id ORDER BY COUNT(*) DESC LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+
+        if let Some(pid) = parent_with_subs {
+            let subs = store.list_subagents(&pid).unwrap();
+            println!("父会话 {pid} 的子代理 {} 个:", subs.len());
+            for s in subs.iter().take(8) {
+                println!("  · {} [{}] {} 条 · {} KB", s.name, s.agent_type, s.message_count, s.size_bytes / 1024);
+            }
+            assert!(!subs.is_empty(), "应能列出子代理");
+            // 顶层列表不应包含任何子代理文件（parent_id 非空者）。
+            for p in store.list_projects().unwrap() {
+                for sess in store.list_sessions(&p.path).unwrap() {
+                    assert!(
+                        !sess.file_path.contains("/subagents/"),
+                        "顶层列表混入了子代理: {}",
+                        sess.file_path
+                    );
+                }
+            }
+            println!("✓ 顶层列表已排除全部子代理");
+        } else {
+            println!("（本机无子代理数据，跳过断言）");
+        }
+
+        // Codex 子代理专项：统计 codex 工具的子代理数，并验证 Codex 父会话能列出子代理。
+        let codex_subs: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE tool='codex' AND parent_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        println!("Codex 子代理数: {codex_subs}");
+        // 找一个有子代理的 Codex 父会话，验证标题格式「角色 · 昵称」。
+        let codex_parent: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT parent_id FROM sessions WHERE tool='codex' AND parent_id IS NOT NULL GROUP BY parent_id ORDER BY COUNT(*) DESC LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        if let Some(pid) = codex_parent {
+            let subs = store.list_subagents(&pid).unwrap();
+            println!("Codex 父 {pid} 的子代理 {} 个:", subs.len());
+            for s in subs.iter().take(6) {
+                println!("  · {} | {} 条 · {} KB", s.name, s.message_count, s.size_bytes / 1024);
+            }
+            assert!(!subs.is_empty(), "Codex 父应能列出子代理");
         }
     }
 }

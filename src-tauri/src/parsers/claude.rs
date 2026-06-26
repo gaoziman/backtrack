@@ -2,7 +2,7 @@
 use crate::models::{Message, Role, SessionMeta, Tool};
 use crate::parsers::{
     content_to_text, format_tool_input, is_command_invocation, is_greeting, is_system_noise,
-    title_with_ai_fallback,
+    parse_subagent_meta, title_with_ai_fallback,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -83,7 +83,8 @@ fn emit_parts(
 }
 
 /// 解析单个 Claude 会话文件。坏文件返回 None（由索引器跳过）。
-pub fn parse_claude(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
+/// `parent_id`：本文件为子代理时其父会话 id（来自 scanner），普通会话传 None。
+pub fn parse_claude(path: &Path, parent_id: Option<String>) -> Option<(SessionMeta, Vec<Message>)> {
     let raw = std::fs::read_to_string(path).ok()?;
     let id = path.file_stem()?.to_string_lossy().to_string();
 
@@ -135,11 +136,16 @@ pub fn parse_claude(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         return None;
     }
 
-    // 标题：优先 user 实质句 → user 首句 → AI 兜底（首条 assistant 文本，AI 常复述任务）。
-    let title = title_with_ai_fallback(
-        first_substantive.as_deref().or(first_user_text.as_deref()),
-        &messages,
-    );
+    // 标题派生：
+    // - 子代理：优先 .meta.json 的 description/agentType（友好名），缺失再退到正文派生链；
+    // - 普通会话：user 实质句 → user 首句 → AI 兜底。
+    let title = match parent_id.as_ref().and_then(|_| parse_subagent_meta(path)) {
+        Some(m) if !m.name.trim().is_empty() => m.name,
+        _ => title_with_ai_fallback(
+            first_substantive.as_deref().or(first_user_text.as_deref()),
+            &messages,
+        ),
+    };
     let meta = SessionMeta {
         resume_command: Tool::Claude.resume_command(&id),
         id,
@@ -154,6 +160,8 @@ pub fn parse_claude(path: &Path) -> Option<(SessionMeta, Vec<Message>)> {
         has_children: false,
         favorited: false,
         collection_ids: Vec::new(),
+        parent_id,
+        subagent_count: 0,
     };
     Some((meta, messages))
 }
@@ -180,7 +188,7 @@ mod tests {
     fn parses_claude_session() {
         let dir = write_fixture(SAMPLE, "754a4be0.jsonl");
         let path = dir.path().join("754a4be0.jsonl");
-        let (meta, msgs) = parse_claude(&path).expect("should parse");
+        let (meta, msgs) = parse_claude(&path, None).expect("should parse");
 
         assert_eq!(meta.id, "754a4be0");
         assert_eq!(meta.tool, Tool::Claude);
@@ -199,7 +207,7 @@ mod tests {
     #[test]
     fn captures_tool_use_input() {
         let dir = write_fixture(SAMPLE, "x.jsonl");
-        let (_, msgs) = parse_claude(&dir.path().join("x.jsonl")).unwrap();
+        let (_, msgs) = parse_claude(&dir.path().join("x.jsonl"), None).unwrap();
         let bash = msgs.iter().find(|m| m.tool_name.as_deref() == Some("Bash")).unwrap();
         assert_eq!(bash.text, "ls"); // 入参的 command 被渲染出来了
     }
@@ -210,7 +218,7 @@ mod tests {
         let content = r#"{"type":"assistant","timestamp":"t","message":{"role":"assistant","content":[{"type":"text","text":"我来跑个命令"},{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]}}
 {"type":"user","cwd":"/p","timestamp":"t0","message":{"role":"user","content":"开始"}}"#;
         let dir = write_fixture(content, "y.jsonl");
-        let (_, msgs) = parse_claude(&dir.path().join("y.jsonl")).unwrap();
+        let (_, msgs) = parse_claude(&dir.path().join("y.jsonl"), None).unwrap();
         // text 块 + tool_use 块 + user 块 = 3
         assert_eq!(msgs.len(), 3);
         assert!(msgs.iter().any(|m| m.text == "我来跑个命令" && m.tool_name.is_none()));
@@ -222,7 +230,7 @@ mod tests {
         let content = r#"{"type":"user","cwd":"/p","timestamp":"t","message":{"role":"user","content":[{"type":"tool_result","content":"Exit code 1"}]}}
 {"type":"user","timestamp":"t","message":{"role":"user","content":"做点事"}}"#;
         let dir = write_fixture(content, "z.jsonl");
-        let (_, msgs) = parse_claude(&dir.path().join("z.jsonl")).unwrap();
+        let (_, msgs) = parse_claude(&dir.path().join("z.jsonl"), None).unwrap();
         let res = msgs.iter().find(|m| matches!(m.role, Role::Tool)).unwrap();
         assert_eq!(res.text, "Exit code 1");
     }
@@ -232,7 +240,7 @@ mod tests {
         let content = "not json\n".to_string() + SAMPLE;
         let dir = write_fixture(&content, "abc.jsonl");
         let path = dir.path().join("abc.jsonl");
-        let (meta, _) = parse_claude(&path).expect("should still parse");
+        let (meta, _) = parse_claude(&path, None).expect("should still parse");
         assert_eq!(meta.message_count, 3);
     }
 
@@ -240,6 +248,33 @@ mod tests {
     fn empty_file_returns_none() {
         let dir = write_fixture("\n\n", "empty.jsonl");
         let path = dir.path().join("empty.jsonl");
-        assert!(parse_claude(&path).is_none());
+        assert!(parse_claude(&path, None).is_none());
+    }
+
+    #[test]
+    fn subagent_title_uses_meta_description() {
+        // 子代理 jsonl 首行是 "You are the ..." 长提示词；标题应来自 .meta.json 的 description。
+        let content = r#"{"type":"user","isSidechain":true,"cwd":"/Users/leo/proj","timestamp":"2026-06-23T08:00:00Z","message":{"role":"user","content":"You are the \"code-searcher\" agent in a project-wide audit team..."}}
+{"type":"assistant","timestamp":"2026-06-23T08:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"好的，我来检索"}]}}"#;
+        let dir = write_fixture(content, "agent-a1e1.jsonl");
+        let jsonl = dir.path().join("agent-a1e1.jsonl");
+        std::fs::File::create(dir.path().join("agent-a1e1.meta.json"))
+            .unwrap()
+            .write_all(br#"{"agentType":"Explore","description":"Code search & business logic"}"#)
+            .unwrap();
+        let (meta, _) = parse_claude(&jsonl, Some("parent-uuid".into())).expect("should parse");
+        assert_eq!(meta.title, "Code search & business logic", "子代理标题应取 meta.description");
+        assert_eq!(meta.parent_id.as_deref(), Some("parent-uuid"));
+    }
+
+    #[test]
+    fn subagent_without_meta_falls_back_to_body() {
+        // 子代理但无 .meta.json → 退回正文派生链（首条实质句）。
+        let content = r#"{"type":"user","isSidechain":true,"cwd":"/p","timestamp":"t","message":{"role":"user","content":"分析认证流程的边界条件"}}"#;
+        let dir = write_fixture(content, "agent-b.jsonl");
+        let jsonl = dir.path().join("agent-b.jsonl");
+        let (meta, _) = parse_claude(&jsonl, Some("pp".into())).unwrap();
+        assert_eq!(meta.title, "分析认证流程的边界条件");
+        assert_eq!(meta.parent_id.as_deref(), Some("pp"));
     }
 }

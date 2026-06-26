@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
-import { IconCheck, IconStarFilled } from "./icons";
+import { IconCheck, IconPinFilled } from "./icons";
 
 function leafName(path: string): string {
   const parts = path.split("/").filter(Boolean);
@@ -36,7 +36,7 @@ export function ManageDirs() {
         <div className="modal-head">
           <h2>
             <span style={{ color: "var(--accent)", display: "flex" }}>
-              <IconStarFilled size={16} />
+              <IconPinFilled size={16} />
             </span>
             管理显示目录
           </h2>

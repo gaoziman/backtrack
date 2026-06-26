@@ -23,6 +23,10 @@ export const IconReveal = ({ size }: P) => (<svg {...s(size)}><path d="M9 5H6a2 
 const STAR = "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 17.9 6.8 20.6l1-5.8L3.5 9.7l5.9-.9L12 3.5Z";
 export const IconStar = ({ size }: P) => (<svg {...s(size)} strokeWidth={1.8}><path d={STAR} /></svg>);
 export const IconStarFilled = ({ size }: P) => (<svg {...s(size)} fill="currentColor" stroke="none"><path d={STAR} /></svg>);
+// 关注/标记旗标：未关注=描边旗杆，已关注=实心 accent 旗（取代五角星，工具感更克制）。
+// 名称沿用 Pin（语义=置顶/标记），避免改动所有引用点。
+export const IconPin = ({ size }: P) => (<svg {...s(size)} strokeWidth={1.8} strokeLinejoin="round" strokeLinecap="round"><path d="M7 4v16M7 5h9l-2 3 2 3H7" /></svg>);
+export const IconPinFilled = ({ size }: P) => (<svg {...s(size)} strokeLinejoin="round" strokeLinecap="round"><path d="M7 4v16" fill="none" stroke="currentColor" strokeWidth={2} /><path d="M7.5 5h9l-2 3 2 3h-9Z" fill="currentColor" stroke="none" /></svg>);
 export const IconSliders = ({ size }: P) => (<svg {...s(size)}><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5" /><circle cx="15" cy="6" r="2" /><circle cx="8" cy="12" r="2" /><circle cx="13" cy="18" r="2" /></svg>);
 export const IconX = ({ size }: P) => (<svg {...s(size)} strokeWidth={2.4}><path d="M6 6l12 12M18 6 6 18" /></svg>);
 export const IconPencil = ({ size }: P) => (<svg {...s(size)}><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3Z" /><path d="m13.5 6.5 3 3" /></svg>);
@@ -38,3 +42,4 @@ export const IconTag = ({ size }: P) => (<svg {...s(size)} strokeWidth={1.8}><pa
 export const IconPlus = ({ size }: P) => (<svg {...s(size)} strokeWidth={2.4}><path d="M12 5v14M5 12h14" /></svg>);
 export const IconFolderPlus = ({ size }: P) => (<svg {...s(size)} strokeWidth={1.8}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" /><path d="M12 11v5M9.5 13.5h5" strokeWidth={1.8} /></svg>);
 export const IconGrip = ({ size }: P) => (<svg {...s(size)} strokeWidth={0} fill="currentColor"><circle cx="9" cy="6" r="1.4" /><circle cx="15" cy="6" r="1.4" /><circle cx="9" cy="12" r="1.4" /><circle cx="15" cy="12" r="1.4" /><circle cx="9" cy="18" r="1.4" /><circle cx="15" cy="18" r="1.4" /></svg>);
+export const IconAgent = ({ size }: P) => (<svg {...s(size)} strokeWidth={1.8}><rect x="5" y="9" width="14" height="10" rx="2.5" /><path d="M12 5v4M12 5a1.3 1.3 0 1 0 0-2.6A1.3 1.3 0 0 0 12 5Z" /><circle cx="9.3" cy="13.5" r="1.1" fill="currentColor" stroke="none" /><circle cx="14.7" cy="13.5" r="1.1" fill="currentColor" stroke="none" /><path d="M2.5 12.5v3M21.5 12.5v3" /></svg>);

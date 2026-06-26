@@ -4,7 +4,7 @@ import type { Project, SearchHit, SessionMeta } from "../types";
 import { ContextMenu, MenuEntry } from "./ContextMenu";
 import {
   IconChevron, IconCopy, IconDownload, IconEye, IconEyeOff, IconFolder, IconPencil, IconRefresh, IconReveal,
-  IconSliders, IconStar, IconStarFilled, IconTerminal, IconTrash, IconBookmark, IconBookmarkFilled,
+  IconSliders, IconPin, IconPinFilled, IconTerminal, IconTrash, IconBookmark, IconBookmarkFilled,
 } from "./icons";
 
 function leafName(path: string): string {
@@ -177,7 +177,7 @@ export function Sidebar({ width }: { width: number }) {
       items: [
         {
           label: isStar ? "取消关注" : "关注",
-          icon: isStar ? <IconStar size={14} /> : <IconStarFilled size={14} />,
+          icon: isStar ? <IconPin size={14} /> : <IconPinFilled size={14} />,
           onClick: () => toggleStar(p),
         },
         { label: "在 Finder 中显示", icon: <IconReveal size={14} />, onClick: () => revealInFinder(p.path, false) },
@@ -269,9 +269,7 @@ export function Sidebar({ width }: { width: number }) {
         <span className="spacer" />
         <div className="seg">
           <button className={viewMode === "all" ? "on" : ""} onClick={() => setViewMode("all")}>全部</button>
-          <button className={viewMode === "starred" ? "on" : ""} onClick={() => setViewMode("starred")}>
-            <IconStarFilled size={11} />关注
-          </button>
+          <button className={viewMode === "starred" ? "on" : ""} onClick={() => setViewMode("starred")}>关注</button>
         </div>
         <span className="manage-btn" title="管理显示目录" onClick={openManage}><IconSliders size={15} /></span>
       </div>
@@ -295,7 +293,7 @@ export function Sidebar({ width }: { width: number }) {
         return (
           <div key={p.path}>
             <div
-              className={`proj ${open ? "open" : ""}`}
+              className={`proj ${open ? "open" : ""} ${isStar ? "starred" : ""}`}
               onClick={() => toggleProject(p.path)}
               onContextMenu={(e) => { e.preventDefault(); setMenu(projectMenu(e, p)); }}
               title={p.path}
@@ -308,7 +306,7 @@ export function Sidebar({ width }: { width: number }) {
                 title={isStar ? "取消关注" : "关注"}
                 onClick={(e) => { e.stopPropagation(); toggleStar(p); }}
               >
-                {isStar ? <IconStarFilled size={13} /> : <IconStar size={13} />}
+                {isStar ? <IconPinFilled size={13} /> : <IconPin size={13} />}
               </span>
               <span className="ct">{p.session_count}</span>
             </div>

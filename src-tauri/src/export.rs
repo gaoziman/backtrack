@@ -273,6 +273,8 @@ mod tests {
             has_children: false,
             favorited: false,
             collection_ids: Vec::new(),
+            parent_id: None,
+            subagent_count: 0,
         }
     }
 
